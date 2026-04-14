@@ -190,9 +190,19 @@ export default function Home() {
                   resumeSignal={resumeChatSignal}
                 />
 
-                {/* After song is composed: show audio prompt + resume chat + edit sections */}
+                {/* After song is composed: show title, audio prompt, melody, edit sections */}
                 {song && (
                   <>
+                    <div className="rounded-lg border border-[#e9e9e9] bg-white p-5 shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
+                      <h2 className="text-xl font-bold text-[#3b3b3b] mb-4">{song.title}</h2>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+                        <Stat label="Genre" value={song.genre} />
+                        <Stat label="Mood"  value={song.mood} />
+                        <Stat label="Key"   value={song.key} />
+                        <Stat label="Tempo" value={`${song.tempo} BPM`} />
+                      </div>
+                    </div>
+
                     <div className="rounded-lg border border-[#e9e9e9] bg-white p-4 shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
                       <div className="flex items-center justify-between mb-2">
                         <label className="block text-xs font-medium text-[#676767]">Audio generation prompt</label>
@@ -213,6 +223,14 @@ export default function Home() {
                         maxLength={200}
                         className="w-full rounded bg-[#f6f6f6] border border-[#e9e9e9] text-[#3b3b3b] px-3 py-2 text-sm resize-none focus:outline-none focus:ring-1 focus:ring-[#f37321] focus:border-[#f37321]"
                       />
+                    </div>
+
+                    <div className="rounded-lg border border-[#e9e9e9] bg-white p-4 shadow-[0_2px_8px_rgba(0,0,0,0.06)] flex flex-col gap-2">
+                      <label className="block text-xs font-medium text-[#676767]">
+                        Melody reference
+                        <span className="text-[#929292] font-normal ml-1">— hum or upload to guide the vocal melody</span>
+                      </label>
+                      <MelodyRecorder onMelodyChange={setMelodyUrl} />
                     </div>
 
                     <div className="flex justify-end">
