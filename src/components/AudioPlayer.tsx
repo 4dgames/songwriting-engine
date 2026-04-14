@@ -67,8 +67,10 @@ export default function AudioPlayer({
   const [instVolume,   setInstVolume]   = useState(0.75);
   const [vocalsVolume, setVocalsVolume] = useState(0.9);
 
-  const [viewLayout, setViewLayout] = useState<'waveform' | 'sheet'>('waveform');
-  const [peaks,      setPeaks]      = useState<number[]>([]);
+  const [viewLayout,    setViewLayout]    = useState<'waveform' | 'sheet'>('waveform');
+  const [peaks,         setPeaks]         = useState<number[]>([]);
+  const [waveformZoom,  setWaveformZoom]  = useState(1);
+  const waveformScrollRef = useRef<HTMLDivElement>(null);
 
   const [currentInstrumentalUrl, setCurrentInstrumentalUrl] = useState(audioUrl);
   const [currentVocalsUrl,       setCurrentVocalsUrl]       = useState(vocalsUrl ?? '');
@@ -107,6 +109,15 @@ export default function AudioPlayer({
 
   // Reset cached peaks whenever the track changes
   useEffect(() => { setPeaks([]); }, [currentInstrumentalUrl]);
+
+  // Auto-scroll waveform to keep playhead centred when zoomed
+  useEffect(() => {
+    if (waveformZoom <= 1 || !waveformScrollRef.current) return;
+    const el = waveformScrollRef.current;
+    const totalW = el.scrollWidth;
+    const viewW  = el.clientWidth;
+    el.scrollLeft = Math.max(0, Math.min((progress / 100) * totalW - viewW / 2, totalW - viewW));
+  }, [progress, waveformZoom]);
 
   // Programmatic play via playTrigger prop (e.g. from wizard "play my song")
   useEffect(() => {
@@ -476,6 +487,25 @@ export default function AudioPlayer({
             </span>
           )}
 
+          {/* Zoom controls (waveform mode only) */}
+          {viewLayout === 'waveform' && (
+            <div className="flex items-center gap-1 flex-shrink-0">
+              <button
+                onClick={() => setWaveformZoom(z => Math.max(0.5, parseFloat((z - 0.5).toFixed(1))))}
+                disabled={waveformZoom <= 0.5}
+                className="w-5 h-5 flex items-center justify-center rounded border border-[#e9e9e9] bg-[#f6f6f6] text-[#676767] hover:border-[#bdbdbd] disabled:opacity-30 disabled:cursor-not-allowed text-xs font-bold leading-none"
+                title="Zoom out"
+              >−</button>
+              <span className="text-[10px] text-[#929292] tabular-nums w-6 text-center">{waveformZoom}×</span>
+              <button
+                onClick={() => setWaveformZoom(z => Math.min(5, parseFloat((z + 0.5).toFixed(1))))}
+                disabled={waveformZoom >= 5}
+                className="w-5 h-5 flex items-center justify-center rounded border border-[#e9e9e9] bg-[#f6f6f6] text-[#676767] hover:border-[#bdbdbd] disabled:opacity-30 disabled:cursor-not-allowed text-xs font-bold leading-none"
+                title="Zoom in"
+              >+</button>
+            </div>
+          )}
+
           {/* Layout toggle */}
           <button
             onClick={() => setViewLayout(v => v === 'waveform' ? 'sheet' : 'waveform')}
@@ -487,14 +517,12 @@ export default function AudioPlayer({
             }`}
           >
             {viewLayout === 'waveform' ? (
-              // Musical staff icon
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeWidth={1.5} d="M3 5h18M3 9h18M3 13h18M3 17h18" />
                 <circle cx="8" cy="17" r="2" fill="currentColor" stroke="none" />
                 <path strokeLinecap="round" strokeWidth={1.5} d="M10 17V9" />
               </svg>
             ) : (
-              // Waveform icon
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
                   d="M3 12h2l2-7 2 14 2-10 2 6 2-3h2l2 0" />
@@ -535,7 +563,10 @@ export default function AudioPlayer({
             onSeek={seek}
             onSectionClick={handleSectionClick}
           />
-        ) : hasTwoTracks ? (
+        ) : (
+          <div ref={waveformScrollRef} style={{ overflowX: waveformZoom > 1 ? 'auto' : 'visible', scrollbarWidth: 'none' }}>
+            <div style={{ width: waveformZoom !== 1 ? `${waveformZoom * 100}%` : '100%', minWidth: '100%' }}>
+        {hasTwoTracks ? (
           <div className="flex flex-col gap-1">
             {/* Section labels — rendered once above both tracks, aligned with the waveform column */}
             {sectionMarkers.length > 0 && (
@@ -623,6 +654,9 @@ export default function AudioPlayer({
             onBeatPhaseReady={handleBeatPhaseReady}
             tempo={tempo}
           />
+        )}
+            </div>
+          </div>
         )}
 
         {/* ── Instrument stems (waveform mode only) ── */}

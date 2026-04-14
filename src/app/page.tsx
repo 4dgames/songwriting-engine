@@ -214,19 +214,7 @@ export default function Home() {
                   />
                 ) : null}
 
-                {/* Progress / error */}
-                {loading && (
-                  <div className="rounded-lg border border-[#e9e9e9] bg-white p-5 shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
-                    <div className="flex items-center justify-between mb-3">
-                      <span className="font-semibold text-[#3b3b3b]">Creating Your Song</span>
-                      <span className="text-sm tabular-nums text-[#929292]">{Math.round(progress)}%</span>
-                    </div>
-                    <div className="w-full h-2 rounded-full bg-[#e9e9e9] overflow-hidden mb-3">
-                      <div className="h-full rounded-full bg-[#f37321] transition-all duration-700 ease-out" style={{ width: `${progress}%` }} />
-                    </div>
-                    {progressLabel && <p className="text-xs text-[#929292]">{progressLabel}</p>}
-                  </div>
-                )}
+                {/* (progress bar is a fixed overlay — see below) */}
 
                 {error && (
                   <p className="text-sm text-red-600 rounded-lg border border-red-200 bg-red-50 px-4 py-3">{error}</p>
@@ -281,9 +269,7 @@ export default function Home() {
                 autoGenerate={autoGenerate}
                 onViewLayoutChange={setViewLayout}
                 playRequestCount={playRequestCount}
-                onGenerationStart={() => {
-                  setTimeout(() => document.getElementById('audio-generation-progress')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 150);
-                }}
+                onGenerationStart={() => { /* overlay is fixed — no scroll needed */ }}
                 onAudioReady={() => {
                   setAudioReadyCount(c => c + 1);
                   setTimeout(() => document.getElementById('song-audio-player')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 300);
@@ -293,6 +279,22 @@ export default function Home() {
           )}
         </div>
       </main>
+
+      {/* Song composing progress — fixed overlay */}
+      {loading && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+          <div className="rounded-xl border border-[#e9e9e9] bg-white p-6 shadow-[0_8px_40px_rgba(0,0,0,0.18)] w-80">
+            <div className="flex items-center justify-between mb-3">
+              <span className="font-semibold text-[#3b3b3b]">Creating Your Song</span>
+              <span className="text-sm tabular-nums text-[#929292]">{Math.round(progress)}%</span>
+            </div>
+            <div className="w-full h-2 rounded-full bg-[#e9e9e9] overflow-hidden mb-3">
+              <div className="h-full rounded-full bg-[#f37321] transition-all duration-700 ease-out" style={{ width: `${progress}%` }} />
+            </div>
+            {progressLabel && <p className="text-xs text-[#929292]">{progressLabel}</p>}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

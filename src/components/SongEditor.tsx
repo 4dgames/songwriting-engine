@@ -761,46 +761,45 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
         </label>
       </div>
 
-      {/* Audio generation progress panel */}
+      {/* Audio generation progress — floating fixed overlay */}
       {(generating || separating || separatingInstruments) && (
-        <div id="audio-generation-progress" className="rounded-lg border border-[#e9e9e9] bg-white p-5 shadow-[0_2px_8px_rgba(0,0,0,0.06)] w-1/2 min-w-72 mx-auto">
-          {generating ? (
-            <>
-              <div className="flex items-center justify-between mb-3">
-                <span className="font-semibold text-[#3b3b3b]">Generating Audio</span>
-                <span className="text-sm tabular-nums text-[#929292]">{Math.round(audioProgress)}%</span>
-              </div>
-              <div className="w-full h-2 rounded-full bg-[#e9e9e9] overflow-hidden mb-3">
-                <div
-                  className="h-full rounded-full bg-[#f37321] transition-all duration-700 ease-out"
-                  style={{ width: `${audioProgress}%` }}
-                />
-              </div>
-              <p className="text-xs text-[#929292]">{deriveAudioLabel(audioProgress)}</p>
-            </>
-          ) : separating ? (
-            <>
-              <div className="flex items-center justify-between mb-3">
-                <span className="font-semibold text-[#3b3b3b]">Splitting Tracks</span>
-                <span className="text-sm tabular-nums text-[#929292]">{Math.round(separationProgress)}%</span>
-              </div>
-              <div className="w-full h-2 rounded-full bg-[#e9e9e9] overflow-hidden mb-3">
-                <div className="h-full rounded-full bg-[#f37321] transition-all duration-700 ease-out" style={{ width: `${separationProgress}%` }} />
-              </div>
-              <p className="text-xs text-[#929292]">{separationStep}</p>
-            </>
-          ) : (
-            <>
-              <div className="flex items-center justify-between mb-3">
-                <span className="font-semibold text-[#3b3b3b]">Separating Instruments</span>
-                <span className="text-sm tabular-nums text-[#929292]">{Math.round(instSepProgress)}%</span>
-              </div>
-              <div className="w-full h-2 rounded-full bg-[#e9e9e9] overflow-hidden mb-3">
-                <div className="h-full rounded-full bg-[#f37321] transition-all duration-700 ease-out" style={{ width: `${instSepProgress}%` }} />
-              </div>
-              <p className="text-xs text-[#929292]">{instSepStep}</p>
-            </>
-          )}
+        <div id="audio-generation-progress" className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+          <div className="rounded-xl border border-[#e9e9e9] bg-white p-6 shadow-[0_8px_40px_rgba(0,0,0,0.18)] w-80">
+            {generating ? (
+              <>
+                <div className="flex items-center justify-between mb-3">
+                  <span className="font-semibold text-[#3b3b3b]">Generating Audio</span>
+                  <span className="text-sm tabular-nums text-[#929292]">{Math.round(audioProgress)}%</span>
+                </div>
+                <div className="w-full h-2 rounded-full bg-[#e9e9e9] overflow-hidden mb-3">
+                  <div className="h-full rounded-full bg-[#f37321] transition-all duration-700 ease-out" style={{ width: `${audioProgress}%` }} />
+                </div>
+                <p className="text-xs text-[#929292]">{deriveAudioLabel(audioProgress)}</p>
+              </>
+            ) : separating ? (
+              <>
+                <div className="flex items-center justify-between mb-3">
+                  <span className="font-semibold text-[#3b3b3b]">Splitting Tracks</span>
+                  <span className="text-sm tabular-nums text-[#929292]">{Math.round(separationProgress)}%</span>
+                </div>
+                <div className="w-full h-2 rounded-full bg-[#e9e9e9] overflow-hidden mb-3">
+                  <div className="h-full rounded-full bg-[#f37321] transition-all duration-700 ease-out" style={{ width: `${separationProgress}%` }} />
+                </div>
+                <p className="text-xs text-[#929292]">{separationStep}</p>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center justify-between mb-3">
+                  <span className="font-semibold text-[#3b3b3b]">Separating Instruments</span>
+                  <span className="text-sm tabular-nums text-[#929292]">{Math.round(instSepProgress)}%</span>
+                </div>
+                <div className="w-full h-2 rounded-full bg-[#e9e9e9] overflow-hidden mb-3">
+                  <div className="h-full rounded-full bg-[#f37321] transition-all duration-700 ease-out" style={{ width: `${instSepProgress}%` }} />
+                </div>
+                <p className="text-xs text-[#929292]">{instSepStep}</p>
+              </>
+            )}
+          </div>
         </div>
       )}
 
