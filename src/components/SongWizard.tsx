@@ -537,21 +537,21 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
     const fastMatch  = /\b(fast(?:er)?|speed up|quicker)\b/i.test(trimmed);
     if (rateMatch) {
       const val = parseFloat(rateMatch[1]);
-      const newRate = Math.min(2, Math.max(0.5, val > 5 ? val / 100 : val));
+      const newRate = Math.min(1.2, Math.max(0.7, val > 5 ? val / 100 : val));
       setVoiceRate(newRate);
       voiceRateRef.current = newRate;
       setInputText('');
       return;
     }
     if (slowMatch) {
-      const newRate = Math.max(0.5, voiceRateRef.current - 0.2);
+      const newRate = Math.max(0.7, voiceRateRef.current - 0.2);
       setVoiceRate(newRate);
       voiceRateRef.current = newRate;
       setInputText('');
       return;
     }
     if (fastMatch) {
-      const newRate = Math.min(2, voiceRateRef.current + 0.2);
+      const newRate = Math.min(1.2, voiceRateRef.current + 0.2);
       setVoiceRate(newRate);
       voiceRateRef.current = newRate;
       setInputText('');
@@ -788,7 +788,7 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
           <div className="flex items-center gap-3">
             <label className="text-xs text-[#676767] w-16 flex-shrink-0">Speed</label>
             <input
-              type="range" min="0.5" max="2" step="0.1"
+              type="range" min="0.7" max="1.2" step="0.1"
               value={voiceRate}
               onChange={e => setVoiceRate(parseFloat(e.target.value))}
               className="flex-1 accent-[#f37321]"

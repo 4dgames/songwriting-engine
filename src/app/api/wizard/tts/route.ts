@@ -42,7 +42,7 @@ export async function POST(req: NextRequest) {
 
   const { text, rate, voiceId: bodyVoiceId } = await req.json() as { text: string; rate?: number; voiceId?: string };
   if (!text?.trim()) return NextResponse.json({ error: 'text required' }, { status: 400 });
-  const speed = Math.min(2, Math.max(0.5, rate ?? 1.0));
+  const speed = Math.min(1.2, Math.max(0.7, rate ?? 1.0));
 
   const voiceId = process.env.ELEVENLABS_WIZARD_VOICE_ID ?? bodyVoiceId ?? 'JBFqnCBsd6RMkjVDRZzb';
 
