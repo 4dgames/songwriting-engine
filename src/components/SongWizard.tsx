@@ -373,8 +373,7 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
             if (rafRef.current) cancelAnimationFrame(rafRef.current);
             URL.revokeObjectURL(url);
             ttsPlayingRef.current = false;
-            continuousRef.current = true; // re-arm after TTS even if a transient error cleared it
-            startListeningRef.current();
+            if (continuousRef.current) startListeningRef.current();
           };
           await audio.play();
           setSpeakingIndex(msgIndex);
@@ -413,8 +412,7 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
           setSpeakingIndex(null);
           setPlaybackTime(0);
           ttsPlayingRef.current = false;
-          continuousRef.current = true;
-          startListeningRef.current();
+          if (continuousRef.current) startListeningRef.current();
         };
         window.speechSynthesis.speak(utt);
       };
@@ -603,8 +601,7 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
 
     const createAndStart = () => {
       if (!continuousRef.current || ttsPlayingRef.current) return;
-      if (recognitionRef.current) return; // already running — don't create a second instance
-
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const rec = new (SR as any)() as any;
       rec.continuous     = false;  // restart manually for broad browser support
@@ -633,21 +630,18 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
         }
       };
 
-      // Restart automatically when the recognizer stops (end of utterance).
+      // Restart automatically when the recognizer stops (end of utterance)
       rec.onend = () => {
-        recognitionRef.current = null; // clear so the guard in createAndStart allows a new instance
         if (continuousRef.current) createAndStart();
+        else setRecording(false);
       };
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       rec.onerror = (e: any) => {
-        // 'no-speech' and 'aborted' are expected — don't kill continuous mode.
-        // 'network' / 'audio-capture' are transient — let onend handle retry.
-        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-          continuousRef.current = false;
-          setRecording(false);
-        }
-        // All other errors: fall through to onend which will call createAndStart
+        // 'no-speech' is a normal pause; 'aborted' is our intentional abort during TTS — both are expected
+        if (e.error === 'no-speech' || e.error === 'aborted') return;
+        continuousRef.current = false;
+        setRecording(false);
       };
 
       rec.start();
