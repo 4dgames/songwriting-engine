@@ -50,6 +50,34 @@ const greeting = (name: string) =>
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// ── Song composition progress ─────────────────────────────────────────────────
+
+const JSON_MILESTONES: [string, number, string][] = [
+  ['"title"',       8,  'Naming your song…'],
+  ['"genre"',       16, 'Picking the genre…'],
+  ['"tempo"',       24, 'Setting the tempo…'],
+  ['"sections"',    32, 'Writing the sections…'],
+  ['"audioPrompt"', 88, 'Polishing the audio prompt…'],
+];
+
+function deriveJsonProgress(text: string): { pct: number; label: string } {
+  let pct = 5; let label = 'Starting…';
+  for (const [marker, p, l] of JSON_MILESTONES) {
+    if (text.includes(marker)) { pct = p; label = l; }
+    else break;
+  }
+  if (pct === 32 && !text.includes('"audioPrompt"')) {
+    const lyricsCount = (text.match(/"lyrics"/g) ?? []).length;
+    if (lyricsCount > 0) {
+      pct = Math.min(32 + lyricsCount * 8, 87);
+      const labelMatches = [...text.matchAll(/"label"\s*:\s*"([^"]+)"/g)];
+      const sectionName = labelMatches[lyricsCount - 1]?.[1];
+      label = sectionName ? `Writing ${sectionName}…` : `Writing section ${lyricsCount}…`;
+    }
+  }
+  return { pct, label };
+}
+
 function parseSong(text: string): { display: string; song: Song | null } {
   const match = text.match(/SONG_JSON_START\s*([\s\S]*?)\s*SONG_JSON_END/);
   if (!match) {
@@ -258,7 +286,9 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
   const [speechSupported, setSpeechSupported] = useState(false);
   const [generatedSong, setGeneratedSong] = useState<Song | null>(null);
   const [chatDone,      setChatDone]      = useState(false);
-  const [composingJson, setComposingJson] = useState(false);
+  const [composingJson,       setComposingJson]       = useState(false);
+  const [jsonProgress,        setJsonProgress]        = useState(5);
+  const [jsonProgressLabel,   setJsonProgressLabel]   = useState('Starting…');
   const [speakingIndex, setSpeakingIndex] = useState<number | null>(null);
   const [playbackTime,  setPlaybackTime]  = useState(0);
   const [voiceRate,     setVoiceRate]     = useState(1.0);
@@ -559,6 +589,9 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
         accumulated += decoder.decode(value, { stream: true });
         if (accumulated.includes('SONG_JSON_START') && !accumulated.includes('SONG_JSON_END')) {
           setComposingJson(true);
+          const { pct, label } = deriveJsonProgress(accumulated);
+          setJsonProgress(prev => Math.max(prev, pct));
+          setJsonProgressLabel(label);
         }
         const { display } = parseSong(accumulated);
         setMessages(prev => {
@@ -568,6 +601,8 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
         });
       }
       setComposingJson(false);
+      setJsonProgress(5);
+      setJsonProgressLabel('Starting…');
 
       const { display, song } = parseSong(accumulated);
       setMessages(prev => {
@@ -802,21 +837,6 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
           </div>
         )}
 
-        {composingJson && character && (
-          <div className="flex gap-2.5">
-            <div className="w-7 h-7 rounded-full overflow-hidden flex-shrink-0">
-              <CharacterAvatar id={character} color={CHARACTERS[character].color} colorLight={CHARACTERS[character].colorLight} />
-            </div>
-            <div className="bg-[#f6f6f6] rounded-2xl rounded-tl-sm px-3.5 py-2.5 flex items-center gap-2">
-              <span className="inline-flex gap-0.5">
-                {[0,1,2].map(i => (
-                  <span key={i} className="w-1.5 h-1.5 rounded-full bg-[#f37321] animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />
-                ))}
-              </span>
-              <span className="text-xs text-[#929292]">Writing your song…</span>
-            </div>
-          </div>
-        )}
       </div>
 
       {/* ── Action bar (shown when song is ready) ── */}
@@ -891,6 +911,25 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
           </svg>
         </button>
       </div>
+
+      {/* Composing song — floating fixed overlay */}
+      {composingJson && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+          <div className="rounded-xl border border-[#e9e9e9] bg-white p-6 shadow-[0_8px_40px_rgba(0,0,0,0.18)] w-80">
+            <div className="flex items-center justify-between mb-3">
+              <span className="font-semibold text-[#3b3b3b]">Writing Your Song</span>
+              <span className="text-sm tabular-nums text-[#929292]">{Math.round(jsonProgress)}%</span>
+            </div>
+            <div className="w-full h-2 rounded-full bg-[#e9e9e9] overflow-hidden mb-3">
+              <div
+                className="h-full rounded-full bg-[#f37321] transition-all duration-700 ease-out"
+                style={{ width: `${jsonProgress}%` }}
+              />
+            </div>
+            <p className="text-xs text-[#929292]">{jsonProgressLabel}</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
