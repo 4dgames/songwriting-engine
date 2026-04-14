@@ -644,7 +644,7 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
           {/* Add section button */}
           <button
             onClick={() => insertSection(song.sections.length - 1)}
-            className={`rounded-lg border-2 border-dashed border-[#bdbdbd] hover:border-[#f37321] text-[#929292] hover:text-[#f37321] flex items-center justify-center text-2xl transition-colors min-h-[80px] ${sectionLayout === 'scroll' ? 'w-20 flex-shrink-0' : ''}`}
+            className="rounded-lg border-2 border-dashed border-[#bdbdbd] hover:border-[#f37321] text-[#929292] hover:text-[#f37321] flex items-center justify-center text-2xl transition-colors min-h-[80px]"
             title="Add section"
           >
             +
