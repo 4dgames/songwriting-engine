@@ -259,6 +259,7 @@ export default function SongWizard({ onSongReady }: Props) {
   const [showSettings,  setShowSettings]  = useState(false);
   const voiceRateRef    = useRef(1.0);
   const selectedVoiceRef = useRef('');
+  const characterRef    = useRef<Character>('axel');
 
   // ── Refs (avoid stale closures in async/speech callbacks) ──
   const scrollRef       = useRef<HTMLDivElement>(null);
@@ -281,8 +282,9 @@ export default function SongWizard({ onSongReady }: Props) {
   useEffect(() => { messagesRef.current    = messages;    }, [messages]);
   useEffect(() => { loadingRef.current     = loading;     }, [loading]);
   useEffect(() => { onSongReadyRef.current = onSongReady; }, [onSongReady]);
-  useEffect(() => { voiceRateRef.current   = voiceRate;   }, [voiceRate]);
+  useEffect(() => { voiceRateRef.current     = voiceRate;       }, [voiceRate]);
   useEffect(() => { selectedVoiceRef.current = selectedVoiceName; }, [selectedVoiceName]);
+  useEffect(() => { if (character) characterRef.current = character; }, [character]);
 
   // Load browser voices
   useEffect(() => {
@@ -318,14 +320,13 @@ export default function SongWizard({ onSongReady }: Props) {
 
     try {
       // ── Try ElevenLabs first ──────────────────────────────────────────────
-      const char = character ?? 'axel';
       const res = await fetch('/api/wizard/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text:    text.trim(),
           rate:    voiceRateRef.current,
-          voiceId: CHARACTERS[char].voiceId,
+          voiceId: CHARACTERS[characterRef.current].voiceId,
         }),
       });
 
