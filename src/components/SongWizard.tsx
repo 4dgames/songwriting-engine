@@ -20,6 +20,7 @@ interface Props {
   onSongReady: (song: Song, autoGenerate: boolean) => void;
   onPlayRequest?: () => void;   // called when user asks to play the song
   audioReadyCount?: number;     // incremented by parent when audio generation completes
+  resumeSignal?: number;        // increment to re-enable chat input after song is composed
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -276,7 +277,7 @@ function SpeakingText({
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount }: Props) {
+export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount, resumeSignal }: Props) {
   const [character,     setCharacter]     = useState<Character | null>(null);
   const [started,       setStarted]       = useState(false);
   const [messages,      setMessages]      = useState<ChatMessage[]>([]);
@@ -339,6 +340,14 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
     void speakMessage(idx, readyMsg);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [audioReadyCount]);
+  // When parent signals to resume, re-enable the chat input
+  const prevResumeSignal = useRef(0);
+  useEffect(() => {
+    if (!resumeSignal || resumeSignal <= prevResumeSignal.current) return;
+    prevResumeSignal.current = resumeSignal;
+    setChatDone(false);
+  }, [resumeSignal]);
+
   useEffect(() => { voiceRateRef.current     = voiceRate;       }, [voiceRate]);
   useEffect(() => { selectedVoiceRef.current = selectedVoiceName; }, [selectedVoiceName]);
   useEffect(() => { if (character) characterRef.current = character; }, [character]);

@@ -60,6 +60,8 @@ export default function Home() {
   const [viewLayout,      setViewLayout]      = useState<'waveform' | 'sheet'>('waveform');
   const [playRequestCount, setPlayRequestCount] = useState(0);
   const [audioReadyCount,  setAudioReadyCount]  = useState(0);
+  const [sectionsOpen,     setSectionsOpen]     = useState(true);
+  const [resumeChatSignal, setResumeChatSignal] = useState(0);
   const crawlRef      = useRef<ReturnType<typeof setInterval> | null>(null);
   const songEditorRef = useRef<HTMLDivElement>(null);
 
@@ -79,6 +81,7 @@ export default function Home() {
     setError('');
     setSong(null);
     setAutoGenerate(false);
+    setSectionsOpen(true);
     setProgress(5);
     setProgressLabel('Starting…');
 
@@ -127,6 +130,7 @@ export default function Home() {
     setAudioPrompt(wizardSong.audioPrompt);
     setSubmittedPrompt('');       // wizard flow — no single prompt string
     setAutoGenerate(shouldAutoGenerate);
+    setSectionsOpen(true);
   };
 
   const showPromptDisplay = !!submittedPrompt && !editingPrompt;
@@ -178,11 +182,57 @@ export default function Home() {
           <div className="flex flex-col gap-3 w-1/2 min-w-72 mx-auto">
 
             {inputMode === 'wizard' ? (
-              <SongWizard
-                onSongReady={handleWizardSongReady}
-                onPlayRequest={() => setPlayRequestCount(c => c + 1)}
-                audioReadyCount={audioReadyCount}
-              />
+              <>
+                <SongWizard
+                  onSongReady={handleWizardSongReady}
+                  onPlayRequest={() => setPlayRequestCount(c => c + 1)}
+                  audioReadyCount={audioReadyCount}
+                  resumeSignal={resumeChatSignal}
+                />
+
+                {/* After song is composed: show audio prompt + resume chat + edit sections */}
+                {song && (
+                  <>
+                    <div className="rounded-lg border border-[#e9e9e9] bg-white p-4 shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
+                      <div className="flex items-center justify-between mb-2">
+                        <label className="block text-xs font-medium text-[#676767]">Audio generation prompt</label>
+                        <button
+                          onClick={() => setResumeChatSignal(s => s + 1)}
+                          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-[#e9e9e9] text-[#929292] hover:border-[#f37321] hover:text-[#f37321] text-xs font-semibold transition-colors"
+                        >
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                          </svg>
+                          Resume Chat
+                        </button>
+                      </div>
+                      <textarea
+                        value={audioPrompt}
+                        onChange={e => setAudioPrompt(e.target.value.slice(0, 200))}
+                        rows={4}
+                        maxLength={200}
+                        className="w-full rounded bg-[#f6f6f6] border border-[#e9e9e9] text-[#3b3b3b] px-3 py-2 text-sm resize-none focus:outline-none focus:ring-1 focus:ring-[#f37321] focus:border-[#f37321]"
+                      />
+                    </div>
+
+                    <div className="flex justify-end">
+                      <button
+                        onClick={() => setSectionsOpen(s => !s)}
+                        className={`flex items-center gap-1.5 px-4 py-1.5 rounded-lg border text-sm font-semibold transition-colors ${
+                          sectionsOpen
+                            ? 'border-[#f37321] bg-[#fff3eb] text-[#f37321]'
+                            : 'border-[#bdbdbd] text-[#676767] hover:border-[#f37321] hover:text-[#f37321]'
+                        }`}
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h8" />
+                        </svg>
+                        {sectionsOpen ? 'Close Sections' : 'Edit Sections'}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </>
             ) : (
               <>
                 {/* Describe your song — display or input */}
@@ -251,6 +301,22 @@ export default function Home() {
                       </label>
                       <MelodyRecorder onMelodyChange={setMelodyUrl} />
                     </div>
+
+                    <div className="flex justify-end">
+                      <button
+                        onClick={() => setSectionsOpen(s => !s)}
+                        className={`flex items-center gap-1.5 px-4 py-1.5 rounded-lg border text-sm font-semibold transition-colors ${
+                          sectionsOpen
+                            ? 'border-[#f37321] bg-[#fff3eb] text-[#f37321]'
+                            : 'border-[#bdbdbd] text-[#676767] hover:border-[#f37321] hover:text-[#f37321]'
+                        }`}
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h8" />
+                        </svg>
+                        {sectionsOpen ? 'Close Sections' : 'Edit Sections'}
+                      </button>
+                    </div>
                   </>
                 )}
               </>
@@ -269,6 +335,8 @@ export default function Home() {
                 autoGenerate={autoGenerate}
                 onViewLayoutChange={setViewLayout}
                 playRequestCount={playRequestCount}
+                sectionsOpen={sectionsOpen}
+                onSectionsOpenChange={setSectionsOpen}
                 onGenerationStart={() => { /* overlay is fixed — no scroll needed */ }}
                 onAudioReady={() => {
                   setAudioReadyCount(c => c + 1);
