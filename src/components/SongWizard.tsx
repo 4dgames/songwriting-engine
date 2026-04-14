@@ -263,7 +263,8 @@ export default function SongWizard({ onSongReady }: Props) {
   // ── Refs (avoid stale closures in async/speech callbacks) ──
   const scrollRef       = useRef<HTMLDivElement>(null);
   const inputRef        = useRef<HTMLTextAreaElement>(null);
-  const recognitionRef  = useRef<SpeechRecognition | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const recognitionRef  = useRef<any>(null);
   const continuousRef   = useRef(false);   // desired continuous-listen state
   const ttsPlayingRef   = useRef(false);   // true while TTS audio is playing — mic is muted
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -516,12 +517,14 @@ export default function SongWizard({ onSongReady }: Props) {
     const createAndStart = () => {
       if (!continuousRef.current || ttsPlayingRef.current) return;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const rec = new (SR as any)() as SpeechRecognition;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rec = new (SR as any)() as any;
       rec.continuous     = false;  // restart manually for broad browser support
       rec.interimResults = true;
       rec.lang           = 'en-US';
 
-      rec.onresult = (e: SpeechRecognitionEvent) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      rec.onresult = (e: any) => {
         let interim = '';
         let final   = '';
         for (let i = e.resultIndex; i < e.results.length; i++) {
@@ -548,7 +551,8 @@ export default function SongWizard({ onSongReady }: Props) {
         else setRecording(false);
       };
 
-      rec.onerror = (e: SpeechRecognitionErrorEvent) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      rec.onerror = (e: any) => {
         // 'no-speech' is a normal pause; 'aborted' is our intentional abort during TTS — both are expected
         if (e.error === 'no-speech' || e.error === 'aborted') return;
         continuousRef.current = false;
