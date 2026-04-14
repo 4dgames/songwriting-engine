@@ -373,7 +373,7 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
             if (rafRef.current) cancelAnimationFrame(rafRef.current);
             URL.revokeObjectURL(url);
             ttsPlayingRef.current = false;
-            if (continuousRef.current) startListeningRef.current();
+            startListeningRef.current(); // always re-enable mic after AI finishes speaking
           };
           await audio.play();
           setSpeakingIndex(msgIndex);
@@ -412,7 +412,7 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
           setSpeakingIndex(null);
           setPlaybackTime(0);
           ttsPlayingRef.current = false;
-          if (continuousRef.current) startListeningRef.current();
+          startListeningRef.current(); // always re-enable mic after AI finishes speaking
         };
         window.speechSynthesis.speak(utt);
       };
