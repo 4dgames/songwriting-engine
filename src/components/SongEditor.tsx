@@ -79,8 +79,6 @@ interface Props {
   melodyUrl: string | null;
   autoGenerate?: boolean;
   onViewLayoutChange?: (layout: 'waveform' | 'sheet') => void;
-  playRequestCount?: number;  // increment to request playback (generates if needed)
-  onAudioReady?: () => void;  // called when first audio URL becomes available
 }
 
 let _takeSeq = 0;
@@ -95,7 +93,7 @@ function newSection(afterIndex: number, sections: SongSection[]): SongSection {
   };
 }
 
-export default function SongEditor({ song: initial, audioPrompt, onAudioPromptChange, melodyUrl, autoGenerate, onViewLayoutChange, playRequestCount, onAudioReady }: Props) {
+export default function SongEditor({ song: initial, audioPrompt, onAudioPromptChange, melodyUrl, autoGenerate, onViewLayoutChange }: Props) {
   const [song, setSong] = useState<Song>(initial);
   const didAutoGenerate = useRef(false);
 
@@ -137,10 +135,6 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
   const [instSepStep,     setInstSepStep]     = useState('');
   const instSepCrawlRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [error, setError] = useState('');
-  const [playAudioTrigger, setPlayAudioTrigger] = useState(0);
-  const [activeViewLayout, setActiveViewLayout] = useState<'waveform' | 'sheet'>('waveform');
-  const onAudioReadyRef = useRef(onAudioReady);
-  useEffect(() => { onAudioReadyRef.current = onAudioReady; }, [onAudioReady]);
 
   // Auto-generate audio on first mount when requested (e.g. from wizard "Hear my song")
   useEffect(() => {
@@ -150,26 +144,6 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // When wizard requests playback: generate audio if none exists, otherwise trigger play
-  useEffect(() => {
-    if (!playRequestCount) return;
-    if (!liveInstrumentalUrl) {
-      void generateAudio();
-    } else {
-      setPlayAudioTrigger(prev => prev + 1);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playRequestCount]);
-
-  // Notify wizard when audio first becomes available
-  const audioReadyNotifiedRef = useRef(false);
-  useEffect(() => {
-    if (liveInstrumentalUrl && !audioReadyNotifiedRef.current) {
-      audioReadyNotifiedRef.current = true;
-      onAudioReadyRef.current?.();
-    }
-  }, [liveInstrumentalUrl]);
 
   // Asymptotic crawl while generating audio
   useEffect(() => {
@@ -620,8 +594,8 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
   return (
     <div className="flex flex-col gap-6">
 
-      {/* Sections — hidden when in sheet music view (sections shown in the waveform instead) */}
-      <div className={`flex flex-col gap-3 ${activeViewLayout === 'sheet' ? 'hidden' : ''}`}>
+      {/* Sections */}
+      <div className="flex flex-col gap-3">
         <span className="text-xs font-semibold text-[#929292] uppercase tracking-wider">Sections</span>
 
         {/* Section cards */}
@@ -736,11 +710,10 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
               onRegenerateInstrumental={regenerateInstrumental}
               regeneratingVocals={regeneratingVocals}
               regeneratingInstrumental={regeneratingInstrumental}
-              onViewLayoutChange={layout => { setActiveViewLayout(layout); onViewLayoutChange?.(layout); }}
+              onViewLayoutChange={onViewLayoutChange}
               instrumentStems={instrumentStems}
               onSeparateInstruments={separateInstruments}
               separatingInstruments={separatingInstruments}
-              playTrigger={playAudioTrigger}
             />
           )}
         </div>

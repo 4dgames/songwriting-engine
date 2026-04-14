@@ -18,8 +18,6 @@ interface ChatMessage {
 
 interface Props {
   onSongReady: (song: Song, autoGenerate: boolean) => void;
-  onPlayRequest?: () => void;   // called when user asks to play the song
-  audioReadyCount?: number;     // incremented by parent when audio generation completes
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -243,7 +241,7 @@ function SpeakingText({
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount }: Props) {
+export default function SongWizard({ onSongReady }: Props) {
   const [character,     setCharacter]     = useState<Character | null>(null);
   const [started,       setStarted]       = useState(false);
   const [messages,      setMessages]      = useState<ChatMessage[]>([]);
@@ -275,31 +273,15 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
   const rafRef          = useRef<number | null>(null);
   const messagesRef     = useRef(messages);
   const loadingRef      = useRef(false);
-  const hasSongRef       = useRef(false);   // whether a song has ever been generated
-  const generatedSongRef = useRef<Song | null>(null);
-  const onSongReadyRef   = useRef(onSongReady);
+  const hasSongRef      = useRef(false);   // whether a song has ever been generated
+  const onSongReadyRef  = useRef(onSongReady);
   const lastTtsRef      = useRef(-1);      // index of last message sent to TTS
   const startListeningRef = useRef<() => void>(() => {});
-  const onPlayRequestRef  = useRef(onPlayRequest);
 
   // Keep refs in sync
   useEffect(() => { messagesRef.current    = messages;    }, [messages]);
   useEffect(() => { loadingRef.current     = loading;     }, [loading]);
   useEffect(() => { onSongReadyRef.current = onSongReady; }, [onSongReady]);
-  useEffect(() => { onPlayRequestRef.current = onPlayRequest; }, [onPlayRequest]);
-
-  // When audio generation completes, speak the "ready" announcement
-  const prevAudioReadyCount = useRef(0);
-  useEffect(() => {
-    if (!audioReadyCount || audioReadyCount <= prevAudioReadyCount.current) return;
-    prevAudioReadyCount.current = audioReadyCount;
-    const readyMsg = 'Your song is ready! Have a listen.';
-    const idx = messagesRef.current.length;
-    lastTtsRef.current = idx; // prevent auto-TTS from double-speaking this message
-    setMessages(prev => [...prev, { role: 'assistant', content: readyMsg, display: readyMsg }]);
-    void speakMessage(idx, readyMsg);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [audioReadyCount]);
   useEffect(() => { voiceRateRef.current     = voiceRate;       }, [voiceRate]);
   useEffect(() => { selectedVoiceRef.current = selectedVoiceName; }, [selectedVoiceName]);
   useEffect(() => { if (character) characterRef.current = character; }, [character]);
@@ -456,26 +438,6 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
     const trimmed = text.trim();
     if (!trimmed || loadingRef.current) return;
 
-    // ── Detect "play my song" intent ─────────────────────────────────────────
-    const playIntent = /\b(play|hear|listen to|start|launch)\b.*\b(song|track|music|it)\b/i.test(trimmed)
-                    || /\b(play it|play now|play the song)\b/i.test(trimmed);
-    if (playIntent && hasSongRef.current && generatedSongRef.current) {
-      // Song is built — trigger audio generation / playback
-      onPlayRequestRef.current?.();
-      setInputText('');
-      const reply = 'On it! Generating the audio now…';
-      const userIdx = messagesRef.current.length;
-      const assistIdx = userIdx + 1;
-      lastTtsRef.current = assistIdx;
-      setMessages(prev => [
-        ...prev,
-        { role: 'user', content: trimmed, display: trimmed },
-        { role: 'assistant', content: reply, display: reply },
-      ]);
-      void speakMessage(assistIdx, reply);
-      return;
-    }
-
     // ── Detect character switch ───────────────────────────────────────────────
     const switchTo = /\b(talk to|switch to|use|be|i want|speak to)\b.*\bamber\b/i.test(trimmed) ? 'amber'
                    : /\b(talk to|switch to|use|be|i want|speak to)\b.*\baxel\b/i.test(trimmed) ? 'axel'
@@ -568,12 +530,8 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
         const isUpdate = hasSongRef.current;
         hasSongRef.current = true;
         setGeneratedSong(song);
-        generatedSongRef.current = song;
         setChatDone(true);
-        if (!isUpdate) {
-          // First time — auto-start audio generation in the parent
-          onSongReadyRef.current(song, true);
-        } else {
+        if (isUpdate) {
           // Resumed conversation — update the parent's song silently
           onSongReadyRef.current(song, false);
         }
@@ -772,7 +730,7 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
                   playbackTime={playbackTime}
                 />
               </div>
-              {/* SongCard intentionally hidden — song appears in the editor below */}
+              {msg.song && <SongCard song={msg.song} />}
             </div>
           </div>
         ))}
