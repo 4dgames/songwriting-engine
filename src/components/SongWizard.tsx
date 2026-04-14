@@ -437,6 +437,48 @@ export default function SongWizard({ onSongReady }: Props) {
     const trimmed = text.trim();
     if (!trimmed || loadingRef.current) return;
 
+    // ── Detect character switch ───────────────────────────────────────────────
+    const switchTo = /\b(talk to|switch to|use|be|i want|speak to)\b.*\bamber\b/i.test(trimmed) ? 'amber'
+                   : /\b(talk to|switch to|use|be|i want|speak to)\b.*\baxel\b/i.test(trimmed) ? 'axel'
+                   : null;
+    if (switchTo) {
+      const newChar = switchTo as Character;
+      const g = greeting(CHARACTERS[newChar].name);
+      setCharacter(newChar);
+      setMessages([{ role: 'assistant', content: g, display: g }]);
+      setInputText('');
+      lastTtsRef.current = -1; // allow greeting TTS to fire
+      return;
+    }
+
+    // ── Detect speaking-rate change ───────────────────────────────────────────
+    const rateMatch = trimmed.match(/(?:speak|talk|go|read|voice|speed|rate|slow|fast).*?([\d.]+)\s*x/i)
+                   || trimmed.match(/(?:speak|talk)\s+(?:at\s+)?(\d+)\s*(?:percent|%)/i);
+    const slowMatch  = /\b(slow(?:er)?|take it slow(?:er)?)\b/i.test(trimmed);
+    const fastMatch  = /\b(fast(?:er)?|speed up|quicker)\b/i.test(trimmed);
+    if (rateMatch) {
+      const val = parseFloat(rateMatch[1]);
+      const newRate = Math.min(2, Math.max(0.5, val > 5 ? val / 100 : val));
+      setVoiceRate(newRate);
+      voiceRateRef.current = newRate;
+      setInputText('');
+      return;
+    }
+    if (slowMatch) {
+      const newRate = Math.max(0.5, voiceRateRef.current - 0.2);
+      setVoiceRate(newRate);
+      voiceRateRef.current = newRate;
+      setInputText('');
+      return;
+    }
+    if (fastMatch) {
+      const newRate = Math.min(2, voiceRateRef.current + 0.2);
+      setVoiceRate(newRate);
+      voiceRateRef.current = newRate;
+      setInputText('');
+      return;
+    }
+
     // Interrupt any current speech when user sends
     ttsAudioRef.current?.pause();
     setSpeakingIndex(null);
