@@ -307,6 +307,13 @@ export default function AudioPlayer({
 
   // ── Playback controls ─────────────────────────────────────────────────────────
 
+  /** Play an audio element, ignoring AbortError (play interrupted by pause — harmless). */
+  const safePlay = useCallback(async (el: HTMLAudioElement): Promise<void> => {
+    try { await el.play(); } catch (err) {
+      if ((err as Error).name !== 'AbortError') throw err;
+    }
+  }, []);
+
   /** Master play/pause — both tracks start simultaneously at the same position. */
   const toggle = useCallback(async () => {
     const audio = audioRef.current;
@@ -329,14 +336,14 @@ export default function AudioPlayer({
         voc.volume      = vocalsVolumeRef.current;
       }
       // Start both simultaneously
-      const plays: Promise<void>[] = [audio.play()];
-      if (voc) plays.push(voc.play());
+      const plays: Promise<void>[] = [safePlay(audio)];
+      if (voc) plays.push(safePlay(voc));
       await Promise.all(plays);
       setPlaying(true);
       setInstSolo(false);
       setVocalsSolo(false);
     }
-  }, [playing, onActiveSectionChange]);
+  }, [playing, onActiveSectionChange, safePlay]);
 
   /** Solo the instrumental track (stops vocal if it was soloing). */
   const toggleInst = useCallback(async () => {
@@ -349,17 +356,17 @@ export default function AudioPlayer({
       setPlaying(false); setVocalsSolo(false);
       lastNotifiedSectionRef.current = null; onActiveSectionChange?.(null);
       audio.volume = instVolumeRef.current;
-      await audio.play();
+      await safePlay(audio);
       setInstSolo(true);
     } else if (instSolo) {
       audio.pause(); setInstSolo(false);
     } else {
       voc?.pause(); setVocalsSolo(false);
       audio.volume = instVolumeRef.current;
-      await audio.play();
+      await safePlay(audio);
       setInstSolo(true);
     }
-  }, [playing, instSolo, onActiveSectionChange]);
+  }, [playing, instSolo, onActiveSectionChange, safePlay]);
 
   /** Solo the vocals track (stops instrumental if it was soloing). */
   const toggleVocals = useCallback(async () => {
@@ -372,17 +379,17 @@ export default function AudioPlayer({
       setPlaying(false); setInstSolo(false);
       lastNotifiedSectionRef.current = null; onActiveSectionChange?.(null);
       voc.volume = vocalsVolumeRef.current;
-      await voc.play();
+      await safePlay(voc);
       setVocalsSolo(true);
     } else if (vocalsSolo) {
       voc.pause(); setVocalsSolo(false);
     } else {
       audio?.pause(); setInstSolo(false);
       voc.volume = vocalsVolumeRef.current;
-      await voc.play();
+      await safePlay(voc);
       setVocalsSolo(true);
     }
-  }, [playing, vocalsSolo, onActiveSectionChange]);
+  }, [playing, vocalsSolo, onActiveSectionChange, safePlay]);
 
   const updateProgress = (currentTime: number, duration: number) => {
     if (!duration) return;
@@ -708,7 +715,7 @@ function StemTrackRow({ label, audioUrl }: { label: string; audioUrl: string }) 
     const audio = audioRef.current;
     if (!audio) return;
     if (playing) { audio.pause(); setPlaying(false); }
-    else { audio.volume = volume; await audio.play(); setPlaying(true); }
+    else { audio.volume = volume; try { await audio.play(); setPlaying(true); } catch (e) { if ((e as Error).name !== 'AbortError') throw e; } }
   };
 
   const seek = (ratio: number) => {
