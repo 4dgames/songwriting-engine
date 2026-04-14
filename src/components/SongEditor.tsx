@@ -626,7 +626,7 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
     <div className="flex flex-col gap-6">
 
       {/* Sections — collapsible, above waveform, hidden in sheet mode */}
-      {sectionsOpen && activeViewLayout !== 'sheet' && (
+      {sectionsOpen && (
         <div className="flex flex-col gap-3">
           <div className="flex items-center justify-between">
             <span className="text-xs font-semibold text-[#929292] uppercase tracking-wider">Sections</span>
