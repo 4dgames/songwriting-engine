@@ -52,7 +52,12 @@ const greeting = (name: string) =>
 
 function parseSong(text: string): { display: string; song: Song | null } {
   const match = text.match(/SONG_JSON_START\s*([\s\S]*?)\s*SONG_JSON_END/);
-  if (!match) return { display: text, song: null };
+  if (!match) {
+    // Hide everything from SONG_JSON_START onwards while JSON is still streaming
+    const startIdx = text.indexOf('SONG_JSON_START');
+    if (startIdx !== -1) return { display: text.slice(0, startIdx).trim(), song: null };
+    return { display: text, song: null };
+  }
   try {
     const song = JSON.parse(match[1]) as Song;
     const display = text.replace(/SONG_JSON_START[\s\S]*?SONG_JSON_END/, '').trim();
@@ -253,6 +258,7 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
   const [speechSupported, setSpeechSupported] = useState(false);
   const [generatedSong, setGeneratedSong] = useState<Song | null>(null);
   const [chatDone,      setChatDone]      = useState(false);
+  const [composingJson, setComposingJson] = useState(false);
   const [speakingIndex, setSpeakingIndex] = useState<number | null>(null);
   const [playbackTime,  setPlaybackTime]  = useState(0);
   const [voiceRate,     setVoiceRate]     = useState(1.0);
@@ -280,6 +286,7 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
   const onSongReadyRef   = useRef(onSongReady);
   const lastTtsRef      = useRef(-1);      // index of last message sent to TTS
   const startListeningRef = useRef<() => void>(() => {});
+  const stopListeningRef  = useRef<() => void>(() => {});
   const onPlayRequestRef  = useRef(onPlayRequest);
 
   // Keep refs in sync
@@ -288,11 +295,12 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
   useEffect(() => { onSongReadyRef.current = onSongReady; }, [onSongReady]);
   useEffect(() => { onPlayRequestRef.current = onPlayRequest; }, [onPlayRequest]);
 
-  // When audio generation completes, speak the "ready" announcement
+  // When audio generation completes, stop mic and speak the "ready" announcement
   const prevAudioReadyCount = useRef(0);
   useEffect(() => {
     if (!audioReadyCount || audioReadyCount <= prevAudioReadyCount.current) return;
     prevAudioReadyCount.current = audioReadyCount;
+    stopListeningRef.current();
     const readyMsg = 'Your song is ready! Have a listen.';
     const idx = messagesRef.current.length;
     lastTtsRef.current = idx; // prevent auto-TTS from double-speaking this message
@@ -549,6 +557,9 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
         const { done, value } = await reader.read();
         if (done) break;
         accumulated += decoder.decode(value, { stream: true });
+        if (accumulated.includes('SONG_JSON_START') && !accumulated.includes('SONG_JSON_END')) {
+          setComposingJson(true);
+        }
         const { display } = parseSong(accumulated);
         setMessages(prev => {
           const next = [...prev];
@@ -556,6 +567,7 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
           return next;
         });
       }
+      setComposingJson(false);
 
       const { display, song } = parseSong(accumulated);
       setMessages(prev => {
@@ -661,6 +673,8 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
     recognitionRef.current?.abort();
     recognitionRef.current = null;
   }, []);
+
+  stopListeningRef.current = stopListening;
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -777,13 +791,29 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
           </div>
         ))}
 
-        {loading && character && (
+        {loading && !composingJson && character && (
           <div className="flex gap-2.5">
             <div className="w-7 h-7 rounded-full overflow-hidden flex-shrink-0">
               <CharacterAvatar id={character} color={CHARACTERS[character].color} colorLight={CHARACTERS[character].colorLight} />
             </div>
             <div className="bg-[#f6f6f6] rounded-2xl rounded-tl-sm">
               <TypingDots />
+            </div>
+          </div>
+        )}
+
+        {composingJson && character && (
+          <div className="flex gap-2.5">
+            <div className="w-7 h-7 rounded-full overflow-hidden flex-shrink-0">
+              <CharacterAvatar id={character} color={CHARACTERS[character].color} colorLight={CHARACTERS[character].colorLight} />
+            </div>
+            <div className="bg-[#f6f6f6] rounded-2xl rounded-tl-sm px-3.5 py-2.5 flex items-center gap-2">
+              <span className="inline-flex gap-0.5">
+                {[0,1,2].map(i => (
+                  <span key={i} className="w-1.5 h-1.5 rounded-full bg-[#f37321] animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />
+                ))}
+              </span>
+              <span className="text-xs text-[#929292]">Writing your song…</span>
             </div>
           </div>
         )}

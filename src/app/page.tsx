@@ -60,7 +60,8 @@ export default function Home() {
   const [viewLayout,      setViewLayout]      = useState<'waveform' | 'sheet'>('waveform');
   const [playRequestCount, setPlayRequestCount] = useState(0);
   const [audioReadyCount,  setAudioReadyCount]  = useState(0);
-  const crawlRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const crawlRef      = useRef<ReturnType<typeof setInterval> | null>(null);
+  const songEditorRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (loading) {
@@ -270,17 +271,25 @@ export default function Home() {
 
           {/* ── Full-width song editor ── */}
           {song && (
-            <SongEditor
-              key={song.title}
-              song={song}
-              audioPrompt={audioPrompt}
-              onAudioPromptChange={setAudioPrompt}
-              melodyUrl={melodyUrl}
-              autoGenerate={autoGenerate}
-              onViewLayoutChange={setViewLayout}
-              playRequestCount={playRequestCount}
-              onAudioReady={() => setAudioReadyCount(c => c + 1)}
-            />
+            <div ref={songEditorRef}>
+              <SongEditor
+                key={song.title}
+                song={song}
+                audioPrompt={audioPrompt}
+                onAudioPromptChange={setAudioPrompt}
+                melodyUrl={melodyUrl}
+                autoGenerate={autoGenerate}
+                onViewLayoutChange={setViewLayout}
+                playRequestCount={playRequestCount}
+                onGenerationStart={() => {
+                  setTimeout(() => document.getElementById('audio-generation-progress')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 150);
+                }}
+                onAudioReady={() => {
+                  setAudioReadyCount(c => c + 1);
+                  setTimeout(() => document.getElementById('song-audio-player')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 300);
+                }}
+              />
+            </div>
           )}
         </div>
       </main>

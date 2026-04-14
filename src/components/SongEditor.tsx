@@ -79,8 +79,9 @@ interface Props {
   melodyUrl: string | null;
   autoGenerate?: boolean;
   onViewLayoutChange?: (layout: 'waveform' | 'sheet') => void;
-  playRequestCount?: number;  // increment to request playback (generates if needed)
-  onAudioReady?: () => void;  // called when first audio URL becomes available
+  playRequestCount?: number;       // increment to request playback (generates if needed)
+  onAudioReady?: () => void;       // called when first audio URL becomes available
+  onGenerationStart?: () => void;  // called when audio generation begins
 }
 
 let _takeSeq = 0;
@@ -95,7 +96,7 @@ function newSection(afterIndex: number, sections: SongSection[]): SongSection {
   };
 }
 
-export default function SongEditor({ song: initial, audioPrompt, onAudioPromptChange, melodyUrl, autoGenerate, onViewLayoutChange, playRequestCount, onAudioReady }: Props) {
+export default function SongEditor({ song: initial, audioPrompt, onAudioPromptChange, melodyUrl, autoGenerate, onViewLayoutChange, playRequestCount, onAudioReady, onGenerationStart }: Props) {
   const [song, setSong] = useState<Song>(initial);
   const didAutoGenerate = useRef(false);
 
@@ -248,6 +249,7 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
   // ── Audio generation ─────────────────────────────────────────────────────────
 
   const generateAudio = async () => {
+    onGenerationStart?.();
     setGenerating(true);
     setAudioProgress(5);
     setError('');
@@ -680,7 +682,7 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
 
       {/* Song takes selector + AudioPlayer */}
       {hasAudio && (
-        <div className="flex flex-col gap-3">
+        <div id="song-audio-player" className="flex flex-col gap-3">
           {/* Takes bar */}
           <div className="flex items-center gap-2 justify-end flex-wrap">
             <span className="text-xs font-semibold text-[#929292] uppercase tracking-widest">Takes</span>
@@ -761,7 +763,7 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
 
       {/* Audio generation progress panel */}
       {(generating || separating || separatingInstruments) && (
-        <div className="rounded-lg border border-[#e9e9e9] bg-white p-5 shadow-[0_2px_8px_rgba(0,0,0,0.06)] w-1/2 min-w-72 mx-auto">
+        <div id="audio-generation-progress" className="rounded-lg border border-[#e9e9e9] bg-white p-5 shadow-[0_2px_8px_rgba(0,0,0,0.06)] w-1/2 min-w-72 mx-auto">
           {generating ? (
             <>
               <div className="flex items-center justify-between mb-3">
