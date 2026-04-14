@@ -1,26 +1,30 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Amplify brand colors */
+  --amp-orange:       #f37321;
+  --amp-orange-dark:  #da6520;
+  --amp-magenta:      #9c0d63;
+  --amp-blue:         #3278c8;
+  --amp-green:        #00866b;
+  --amp-text:         #3b3b3b;
+  --amp-text-mid:     #676767;
+  --amp-text-light:   #929292;
+  --amp-bg:           #f6f6f6;
+  --amp-card:         #ffffff;
+  --amp-border:       #e9e9e9;
+  --amp-border-dark:  #bdbdbd;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-background: var(--amp-bg);
+  --color-foreground: var(--amp-text);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), 'Helvetica Neue', Arial, sans-serif;
+  background-color: var(--amp-bg);
+  color: var(--amp-text);
 }
