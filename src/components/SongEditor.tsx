@@ -121,6 +121,7 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
 
+  const [sectionsOpen, setSectionsOpen] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [separating, setSeparating] = useState(false);
   const [separationMethod, setSeparationMethod] = useState<'elevenlabs' | 'ica' | null>(null);
@@ -622,63 +623,76 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
   return (
     <div className="flex flex-col gap-6">
 
-      {/* Sections — hidden when in sheet music view (sections shown in the waveform instead) */}
-      <div className={`flex flex-col gap-3 ${activeViewLayout === 'sheet' ? 'hidden' : ''}`}>
-        <span className="text-xs font-semibold text-[#929292] uppercase tracking-wider">Sections</span>
+      {/* Sections — collapsible, hidden in sheet mode */}
+      {sectionsOpen && activeViewLayout !== 'sheet' && (
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-[#929292] uppercase tracking-wider">Sections</span>
+            <button
+              onClick={() => setSectionsOpen(false)}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[#e9e9e9] bg-[#f6f6f6] text-[#929292] hover:border-[#bdbdbd] hover:text-[#3b3b3b] text-xs font-semibold transition-colors"
+            >
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+              </svg>
+              Collapse
+            </button>
+          </div>
 
-        {/* Section cards */}
-        <div className="grid grid-cols-3 lg:grid-cols-4 gap-4">
-          {song.sections.map((section, i) => {
-            const isDragging = dragIndex === i;
-            const isOver     = dragOverIndex === i && dragIndex !== i;
-            return (
-              <div
-                key={i}
-                draggable
-                onDragStart={() => setDragIndex(i)}
-                onDragOver={e => { e.preventDefault(); setDragOverIndex(i); }}
-                onDragLeave={() => setDragOverIndex(null)}
-                onDrop={() => handleDrop(i)}
-                onDragEnd={() => { setDragIndex(null); setDragOverIndex(null); }}
-                className={`flex flex-col gap-2 transition-opacity ${isDragging ? 'opacity-40' : ''}`}
-                style={isOver ? { outline: '2px solid #f37321', borderRadius: 10 } : undefined}
-              >
-                <SectionEditor
-                  section={section}
-                  index={i}
-                  tempo={song.tempo}
-                  onChange={updateSection}
-                  onRegenerate={hasAudio ? () => handleRegenerateSection(i) : undefined}
-                  regenerating={regeneratingSectionIndex === i}
-                  onInsertAfter={() => insertSection(i)}
-                  onDelete={song.sections.length > 1 ? () => setConfirmDeleteIndex(i) : undefined}
-                  sectionTakes={sectionTakes[i]}
-                  onRestoreTake={take => handleRestoreSectionTake(i, take)}
-                  isPlaying={playingSection === i}
-                />
-                {confirmDeleteIndex === i && (
-                  <div className="flex items-center gap-3 px-4 py-3 rounded-lg border border-red-200 bg-red-50 text-sm">
-                    <span className="text-red-700 flex-1">
-                      Delete <span className="font-semibold">{section.label}</span>?
-                    </span>
-                    <button onClick={() => deleteSection(i)} className="px-3 py-1 rounded bg-red-600 hover:bg-red-700 text-white text-xs font-medium transition-colors">Delete</button>
-                    <button onClick={() => setConfirmDeleteIndex(null)} className="px-3 py-1 rounded bg-[#e9e9e9] hover:bg-[#bdbdbd] text-[#3b3b3b] text-xs font-medium transition-colors">Cancel</button>
-                  </div>
-                )}
-              </div>
-            );
-          })}
+          {/* Section cards */}
+          <div className="grid grid-cols-3 lg:grid-cols-4 gap-4">
+            {song.sections.map((section, i) => {
+              const isDragging = dragIndex === i;
+              const isOver     = dragOverIndex === i && dragIndex !== i;
+              return (
+                <div
+                  key={i}
+                  draggable
+                  onDragStart={() => setDragIndex(i)}
+                  onDragOver={e => { e.preventDefault(); setDragOverIndex(i); }}
+                  onDragLeave={() => setDragOverIndex(null)}
+                  onDrop={() => handleDrop(i)}
+                  onDragEnd={() => { setDragIndex(null); setDragOverIndex(null); }}
+                  className={`flex flex-col gap-2 transition-opacity ${isDragging ? 'opacity-40' : ''}`}
+                  style={isOver ? { outline: '2px solid #f37321', borderRadius: 10 } : undefined}
+                >
+                  <SectionEditor
+                    section={section}
+                    index={i}
+                    tempo={song.tempo}
+                    onChange={updateSection}
+                    onRegenerate={hasAudio ? () => handleRegenerateSection(i) : undefined}
+                    regenerating={regeneratingSectionIndex === i}
+                    onInsertAfter={() => insertSection(i)}
+                    onDelete={song.sections.length > 1 ? () => setConfirmDeleteIndex(i) : undefined}
+                    sectionTakes={sectionTakes[i]}
+                    onRestoreTake={take => handleRestoreSectionTake(i, take)}
+                    isPlaying={playingSection === i}
+                  />
+                  {confirmDeleteIndex === i && (
+                    <div className="flex items-center gap-3 px-4 py-3 rounded-lg border border-red-200 bg-red-50 text-sm">
+                      <span className="text-red-700 flex-1">
+                        Delete <span className="font-semibold">{section.label}</span>?
+                      </span>
+                      <button onClick={() => deleteSection(i)} className="px-3 py-1 rounded bg-red-600 hover:bg-red-700 text-white text-xs font-medium transition-colors">Delete</button>
+                      <button onClick={() => setConfirmDeleteIndex(null)} className="px-3 py-1 rounded bg-[#e9e9e9] hover:bg-[#bdbdbd] text-[#3b3b3b] text-xs font-medium transition-colors">Cancel</button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
 
-          {/* Add section button */}
-          <button
-            onClick={() => insertSection(song.sections.length - 1)}
-            className="rounded-lg border-2 border-dashed border-[#bdbdbd] hover:border-[#f37321] text-[#929292] hover:text-[#f37321] flex items-center justify-center text-2xl transition-colors min-h-[80px]"
-            title="Add section"
-          >
-            +
-          </button>
+            {/* Add section button */}
+            <button
+              onClick={() => insertSection(song.sections.length - 1)}
+              className="rounded-lg border-2 border-dashed border-[#bdbdbd] hover:border-[#f37321] text-[#929292] hover:text-[#f37321] flex items-center justify-center text-2xl transition-colors min-h-[80px]"
+              title="Add section"
+            >
+              +
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Song takes selector + AudioPlayer */}
       {hasAudio && (
@@ -744,6 +758,34 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
               separatingInstruments={separatingInstruments}
               playTrigger={playAudioTrigger}
             />
+          )}
+
+          {/* Controls below waveform — hidden in sheet mode */}
+          {activeViewLayout !== 'sheet' && (
+            <div className="flex items-center gap-2 justify-end flex-wrap">
+              {liveInstrumentalUrl && !forceInstrumental && (
+                <button
+                  onClick={splitTracks}
+                  disabled={generating || separating}
+                  className="px-4 py-1.5 rounded-lg border border-[#bdbdbd] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] disabled:opacity-40 disabled:cursor-not-allowed text-sm font-semibold transition-colors"
+                >
+                  {separating ? 'Splitting…' : liveVocalsUrl ? 'Re-split tracks' : 'Split into tracks'}
+                </button>
+              )}
+              <button
+                onClick={() => setSectionsOpen(s => !s)}
+                className={`flex items-center gap-1.5 px-4 py-1.5 rounded-lg border text-sm font-semibold transition-colors ${
+                  sectionsOpen
+                    ? 'border-[#f37321] bg-[#fff3eb] text-[#f37321]'
+                    : 'border-[#bdbdbd] text-[#676767] hover:border-[#f37321] hover:text-[#f37321]'
+                }`}
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h8" />
+                </svg>
+                {sectionsOpen ? 'Close Sections' : 'Edit Sections'}
+              </button>
+            </div>
           )}
         </div>
       )}
@@ -811,15 +853,6 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
             latestAudioUrl={liveInstrumentalUrl || null}
             title={song.title}
           />
-          {liveInstrumentalUrl && !forceInstrumental && (
-            <button
-              onClick={splitTracks}
-              disabled={generating || separating}
-              className="px-5 py-2.5 rounded-lg border border-[#bdbdbd] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] disabled:opacity-40 disabled:cursor-not-allowed text-sm font-semibold transition-colors"
-            >
-              {separating ? 'Splitting…' : liveVocalsUrl ? 'Re-split tracks' : 'Split into tracks'}
-            </button>
-          )}
           <button
             onClick={generateAudio}
             disabled={generating || separating}
