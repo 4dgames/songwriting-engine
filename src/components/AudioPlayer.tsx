@@ -41,6 +41,8 @@ interface Props {
   instrumentStems?: { drums: string; bass: string; other: string } | null;
   onSeparateInstruments?: () => void;
   separatingInstruments?: boolean;
+  onSplitTracks?: () => void;
+  splitting?: boolean;
   playTrigger?: number; // increment to programmatically start playback
 }
 
@@ -50,6 +52,7 @@ export default function AudioPlayer({
   onRegenerateVocals, onRegenerateInstrumental, regeneratingVocals, regeneratingInstrumental,
   onViewLayoutChange,
   instrumentStems, onSeparateInstruments, separatingInstruments,
+  onSplitTracks, splitting,
   playTrigger,
 }: Props) {
   const audioRef  = useRef<HTMLAudioElement>(null);
@@ -659,12 +662,40 @@ export default function AudioPlayer({
           </div>
         )}
 
-        {/* ── Instrument stems — only shown after separation is complete ── */}
-        {viewLayout === 'waveform' && instrumentStems && (
-          <div className="border-t border-[#e9e9e9] pt-3 flex flex-col gap-1">
-            <StemTrackRow label="Drums" audioUrl={instrumentStems.drums} />
-            <StemTrackRow label="Bass"  audioUrl={instrumentStems.bass}  />
-            <StemTrackRow label="Other" audioUrl={instrumentStems.other} />
+        {/* ── Track buttons + instrument stems (waveform mode only) ── */}
+        {viewLayout === 'waveform' && (
+          <div className="border-t border-[#e9e9e9] pt-3 flex flex-col gap-3">
+
+            {/* Button row */}
+            <div className="flex items-center gap-2 justify-end flex-wrap">
+              {onSplitTracks && (
+                <button
+                  onClick={onSplitTracks}
+                  disabled={splitting}
+                  className="px-4 py-1.5 rounded-lg border border-[#bdbdbd] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] disabled:opacity-40 disabled:cursor-not-allowed text-sm font-semibold transition-colors"
+                >
+                  {splitting ? 'Splitting…' : vocalsUrl ? 'Re-split tracks' : 'Split into tracks'}
+                </button>
+              )}
+              {vocalsUrl && onSeparateInstruments && (
+                <button
+                  onClick={onSeparateInstruments}
+                  disabled={separatingInstruments}
+                  className="px-4 py-1.5 rounded-lg border border-[#bdbdbd] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] disabled:opacity-40 disabled:cursor-not-allowed text-sm font-semibold transition-colors"
+                >
+                  {separatingInstruments ? 'Separating…' : instrumentStems ? 'Re-separate instruments' : 'Separate instruments'}
+                </button>
+              )}
+            </div>
+
+            {/* Stem rows — only shown after separation */}
+            {instrumentStems && (
+              <div className="flex flex-col gap-1">
+                <StemTrackRow label="Drums" audioUrl={instrumentStems.drums} />
+                <StemTrackRow label="Bass"  audioUrl={instrumentStems.bass}  />
+                <StemTrackRow label="Other" audioUrl={instrumentStems.other} />
+              </div>
+            )}
           </div>
         )}
 

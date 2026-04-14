@@ -756,21 +756,10 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
               instrumentStems={instrumentStems}
               onSeparateInstruments={separateInstruments}
               separatingInstruments={separatingInstruments}
+              onSplitTracks={liveInstrumentalUrl && !forceInstrumental ? splitTracks : undefined}
+              splitting={separating}
               playTrigger={playAudioTrigger}
             />
-          )}
-
-          {/* Controls below waveform — hidden in sheet mode */}
-          {activeViewLayout !== 'sheet' && liveInstrumentalUrl && !forceInstrumental && (
-            <div className="flex items-center gap-2 justify-end flex-wrap">
-              <button
-                onClick={splitTracks}
-                disabled={generating || separating}
-                className="px-4 py-1.5 rounded-lg border border-[#bdbdbd] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] disabled:opacity-40 disabled:cursor-not-allowed text-sm font-semibold transition-colors"
-              >
-                {separating ? 'Splitting…' : liveVocalsUrl ? 'Re-split tracks' : 'Split into tracks'}
-              </button>
-            </div>
           )}
 
         </div>
