@@ -60,7 +60,7 @@ export default function Home() {
   const [viewLayout,      setViewLayout]      = useState<'waveform' | 'sheet'>('waveform');
   const [playRequestCount, setPlayRequestCount] = useState(0);
   const [audioReadyCount,  setAudioReadyCount]  = useState(0);
-  const [sectionsOpen,     setSectionsOpen]     = useState(true);
+  const [sectionsOpen,     setSectionsOpen]     = useState(false);
   const [resumeChatSignal, setResumeChatSignal] = useState(0);
   const crawlRef      = useRef<ReturnType<typeof setInterval> | null>(null);
   const songEditorRef = useRef<HTMLDivElement>(null);
@@ -81,7 +81,6 @@ export default function Home() {
     setError('');
     setSong(null);
     setAutoGenerate(false);
-    setSectionsOpen(true);
     setProgress(5);
     setProgressLabel('Starting…');
 
@@ -130,7 +129,6 @@ export default function Home() {
     setAudioPrompt(wizardSong.audioPrompt);
     setSubmittedPrompt('');       // wizard flow — no single prompt string
     setAutoGenerate(shouldAutoGenerate);
-    setSectionsOpen(true);
   };
 
   const showPromptDisplay = !!submittedPrompt && !editingPrompt;
@@ -245,7 +243,7 @@ export default function Home() {
                         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h8" />
                         </svg>
-                        {sectionsOpen ? 'Close Sections' : 'Edit Sections'}
+                        {sectionsOpen ? 'Close' : 'Edit'}
                       </button>
                     </div>
                   </>
@@ -332,7 +330,7 @@ export default function Home() {
                         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h8" />
                         </svg>
-                        {sectionsOpen ? 'Close Sections' : 'Edit Sections'}
+                        {sectionsOpen ? 'Close' : 'Edit'}
                       </button>
                     </div>
                   </>
