@@ -603,17 +603,7 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
 
     const createAndStart = () => {
       if (!continuousRef.current || ttsPlayingRef.current) return;
-
-      // Tear down any existing instance before creating a new one — prevents
-      // overlapping recognition instances that cause the browser to deny mic access.
-      const old = recognitionRef.current;
-      if (old) {
-        old.onend   = null;
-        old.onerror = null;
-        old.onresult = null;
-        try { old.abort(); } catch { /* ignore */ }
-        recognitionRef.current = null;
-      }
+      if (recognitionRef.current) return; // already running — don't create a second instance
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const rec = new (SR as any)() as any;
@@ -644,9 +634,8 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
       };
 
       // Restart automatically when the recognizer stops (end of utterance).
-      // Don't call setRecording(false) here — stopListening() already does that,
-      // and a brief false reading of continuousRef shouldn't kill the indicator.
       rec.onend = () => {
+        recognitionRef.current = null; // clear so the guard in createAndStart allows a new instance
         if (continuousRef.current) createAndStart();
       };
 
