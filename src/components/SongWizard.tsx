@@ -643,10 +643,11 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
         }
       };
 
-      // Restart automatically when the recognizer stops (end of utterance)
+      // Restart automatically when the recognizer stops (end of utterance).
+      // Don't call setRecording(false) here — stopListening() already does that,
+      // and a brief false reading of continuousRef shouldn't kill the indicator.
       rec.onend = () => {
         if (continuousRef.current) createAndStart();
-        else setRecording(false);
       };
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
