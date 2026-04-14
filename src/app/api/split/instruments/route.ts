@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Replicate from 'replicate';
 
-// Demucs takes 3–5 minutes on a full track
-export const maxDuration = 600;
+// Vercel hobby plan cap is 300s; Demucs typically finishes well within that
+export const maxDuration = 300;
 
 async function streamToBuffer(stream: ReadableStream<Uint8Array>): Promise<Buffer> {
   const reader = stream.getReader();
