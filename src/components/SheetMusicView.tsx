@@ -31,37 +31,52 @@ interface WaveformCanvasProps {
 
 function WaveformCanvas({ peaks, currentRatio, zoom, sectionMarkers, onSeek }: WaveformCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const resolution = Math.round(1600 * Math.max(1, zoom));
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+
+    const dpr  = window.devicePixelRatio || 1;
+    const cssW = canvas.clientWidth;
+    const cssH = canvas.clientHeight;
+    if (!cssW || !cssH) return;
+
+    const physW = Math.round(cssW * dpr);
+    const physH = Math.round(cssH * dpr);
+    if (canvas.width !== physW || canvas.height !== physH) {
+      canvas.width  = physW;
+      canvas.height = physH;
+    }
+
     const ctx = canvas.getContext('2d')!;
-    const { width: w, height: h } = canvas;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // draw in CSS pixel coordinates
+    const w   = cssW;
+    const h   = cssH;
     const mid = h / 2;
+
     ctx.clearRect(0, 0, w, h);
 
-    // Draw alternating section backgrounds
+    // Alternating section backgrounds
     sectionMarkers.forEach((m, i) => {
       const endRatio = sectionMarkers[i + 1]?.ratio ?? 1;
-      const x0 = Math.floor(m.ratio * w);
-      const x1 = Math.ceil(endRatio * w);
       ctx.fillStyle = i % 2 === 0 ? '#f9f9f9' : '#f0f0f0';
-      ctx.fillRect(x0, 0, x1 - x0, h);
+      ctx.fillRect(m.ratio * w, 0, (endRatio - m.ratio) * w, h);
     });
 
-    // Draw waveform bars
+    // Waveform bars drawn by peak position (crisp at any zoom level)
     if (peaks.length > 0) {
-      const playedX = Math.max(0, Math.min(w, Math.round(currentRatio * w)));
-      for (let i = 0; i < w; i++) {
-        const idx  = Math.floor((i / w) * peaks.length);
-        const barH = Math.max(2, (peaks[idx] ?? 0) * h * 0.88);
-        ctx.fillStyle = i < playedX ? '#f37321' : '#c8c8c8';
-        ctx.fillRect(i, mid - barH / 2, 1, barH);
+      const playedX = currentRatio * w;
+      const barW    = w / peaks.length;
+      const barFill = barW < 1.5 ? barW : barW * 0.72;
+      for (let i = 0; i < peaks.length; i++) {
+        const x    = (i / peaks.length) * w;
+        const barH = Math.max(1, (peaks[i] ?? 0) * h * 0.88);
+        ctx.fillStyle = x < playedX ? '#f37321' : '#c8c8c8';
+        ctx.fillRect(x, mid - barH / 2, barFill, barH);
       }
       // Playhead
       ctx.fillStyle = '#f37321';
-      ctx.fillRect(Math.min(Math.round(currentRatio * w), w - 2), 0, 2, h);
+      ctx.fillRect(Math.min(currentRatio * w, w - 1.5), 0, 1.5, h);
     } else {
       ctx.fillStyle = '#e9e9e9';
       ctx.fillRect(0, mid - 1, w, 2);
@@ -70,9 +85,8 @@ function WaveformCanvas({ peaks, currentRatio, zoom, sectionMarkers, onSeek }: W
     // Section divider lines
     sectionMarkers.forEach(m => {
       if (m.ratio === 0) return;
-      const x = Math.round(m.ratio * w);
       ctx.fillStyle = '#bdbdbd';
-      ctx.fillRect(x, 0, 1, h);
+      ctx.fillRect(m.ratio * w - 0.5, 0, 1, h);
     });
   }, [peaks, currentRatio, zoom, sectionMarkers]);
 
@@ -84,8 +98,6 @@ function WaveformCanvas({ peaks, currentRatio, zoom, sectionMarkers, onSeek }: W
   return (
     <canvas
       ref={canvasRef}
-      width={resolution}
-      height={128}
       className="w-full cursor-crosshair"
       style={{ height: 128, display: 'block' }}
       onClick={handleClick}

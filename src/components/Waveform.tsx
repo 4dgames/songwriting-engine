@@ -21,7 +21,7 @@ interface Props {
   showLabels?: boolean; // default true; pass false when labels are rendered externally
 }
 
-const PEAK_COUNT = 800;
+const PEAK_COUNT = 4000;
 
 export default function Waveform({ audioUrl, progress, onSeek, sectionMarkers = [], activeSectionIndex, onSectionClick, onDurationReady, onBeatPhaseReady, tempo, showLabels = true }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -107,13 +107,14 @@ export default function Waveform({ audioUrl, progress, onSeek, sectionMarkers = 
       ctx.fillRect(startRatio * w, 0, (endRatio - startRatio) * w, h);
     }
 
-    // Waveform bars — sub-pixel bar width for smooth scaling at any zoom
-    const barW = Math.max(1, w / peaks.length);
+    // Waveform bars — thin gap between bars only when wide enough to see
+    const barW    = w / peaks.length;
+    const barFill = barW < 1.5 ? barW : barW * 0.72;
     for (let i = 0; i < peaks.length; i++) {
       const x    = (i / peaks.length) * w;
       const barH = Math.max(1, peaks[i] * h * 0.9);
       ctx.fillStyle = x < playedX ? '#f37321' : '#d4d4d4';
-      ctx.fillRect(x, mid - barH / 2, barW - 0.5, barH);
+      ctx.fillRect(x, mid - barH / 2, barFill, barH);
     }
 
     // Section divider lines

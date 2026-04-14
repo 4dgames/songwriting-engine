@@ -126,7 +126,7 @@ export default function AudioPlayer({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playTrigger]);
 
-  // Decode 800-sample peaks when the user switches to sheet layout
+  // Decode high-resolution peaks when the user switches to sheet layout
   useEffect(() => {
     if (viewLayout !== 'sheet' || peaks.length > 0 || !currentInstrumentalUrl) return;
     let cancelled = false;
@@ -138,7 +138,7 @@ export default function AudioPlayer({
         await ctx.close();
         if (cancelled) return;
         const data  = ab.getChannelData(0);
-        const N     = 800;
+        const N     = 4000;
         const block = Math.floor(data.length / N);
         const p: number[] = [];
         for (let i = 0; i < N; i++) {
