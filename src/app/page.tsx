@@ -60,7 +60,7 @@ export default function Home() {
   const [viewLayout,      setViewLayout]      = useState<'waveform' | 'sheet'>('waveform');
   const [playRequestCount, setPlayRequestCount] = useState(0);
   const [audioReadyCount,  setAudioReadyCount]  = useState(0);
-  const [sectionsOpen,     setSectionsOpen]     = useState(false);
+  const [sectionsOpen,     setSectionsOpen]     = useState(true);
   const [resumeChatSignal, setResumeChatSignal] = useState(0);
   const crawlRef      = useRef<ReturnType<typeof setInterval> | null>(null);
   const songEditorRef = useRef<HTMLDivElement>(null);

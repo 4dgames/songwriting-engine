@@ -850,38 +850,6 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
 
       </div>
 
-      {/* ── Action bar (shown when song is ready but audio not yet requested) ── */}
-      {chatDone && !loading && generatedSong && !audioRequested && (
-        <div className="border-t border-[#e9e9e9] px-4 py-3 flex items-center gap-2 bg-[#fffaf6] flex-wrap">
-          <button
-            onClick={() => setChatDone(false)}
-            className="px-3 py-1.5 rounded-lg border border-[#d4d4d4] text-[#676767] hover:border-[#929292] hover:text-[#3b3b3b] text-xs font-semibold transition-colors"
-          >
-            Resume chat
-          </button>
-          <div className="flex-1" />
-          <button
-            onClick={() => onSongReady(generatedSong, false)}
-            className="px-4 py-2 rounded-lg border border-[#bdbdbd] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] text-sm font-semibold transition-colors"
-          >
-            Edit song
-          </button>
-          <button
-            onClick={() => {
-              setAudioRequested(true);
-              onSongReady(generatedSong, false);
-              onPlayRequestRef.current?.();
-            }}
-            className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[#f37321] hover:bg-[#da6520] text-white text-sm font-semibold transition-colors shadow-[0_2px_4px_rgba(243,115,33,0.3)]"
-          >
-            <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
-              <path d="M8 5v14l11-7z" />
-            </svg>
-            Hear my song
-          </button>
-        </div>
-      )}
-
       {/* ── Compose Song button — shown after enough exchanges, before song exists ── */}
       {started && !chatDone && !composingJson && !generatedSong && messages.length >= 4 && (
         <div className="border-t border-[#e9e9e9] px-4 py-2.5 flex justify-end bg-[#fffaf6]">
@@ -942,6 +910,34 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
           </svg>
         </button>
       </div>
+
+      {/* ── Action bar — below input, shown once song is ready ── */}
+      {chatDone && !loading && generatedSong && (
+        <div className="border-t border-[#e9e9e9] px-4 py-2.5 flex items-center gap-2 bg-[#fffaf6] flex-wrap">
+          <button
+            onClick={() => setChatDone(false)}
+            className="px-3 py-1.5 rounded-lg border border-[#d4d4d4] text-[#676767] hover:border-[#929292] hover:text-[#3b3b3b] text-xs font-semibold transition-colors"
+          >
+            Resume chat
+          </button>
+          <div className="flex-1" />
+          {!audioRequested && (
+            <button
+              onClick={() => {
+                setAudioRequested(true);
+                onSongReady(generatedSong, false);
+                onPlayRequestRef.current?.();
+              }}
+              className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[#f37321] hover:bg-[#da6520] text-white text-sm font-semibold transition-colors shadow-[0_2px_4px_rgba(243,115,33,0.3)]"
+            >
+              <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M8 5v14l11-7z" />
+              </svg>
+              Hear my song
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Composing song — floating fixed overlay */}
       {composingJson && (
