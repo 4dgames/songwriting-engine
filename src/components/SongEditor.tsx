@@ -121,7 +121,7 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
 
-  const [sectionsOpen, setSectionsOpen] = useState(false);
+  const [sectionsOpen, setSectionsOpen] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [separating, setSeparating] = useState(false);
   const [separationMethod, setSeparationMethod] = useState<'elevenlabs' | 'ica' | null>(null);
@@ -164,12 +164,13 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playRequestCount]);
 
-  // Notify wizard when audio first becomes available
+  // Notify wizard and close sections when audio first becomes available
   const audioReadyNotifiedRef = useRef(false);
   useEffect(() => {
     if (liveInstrumentalUrl && !audioReadyNotifiedRef.current) {
       audioReadyNotifiedRef.current = true;
       onAudioReadyRef.current?.();
+      setSectionsOpen(false);
     }
   }, [liveInstrumentalUrl]);
 

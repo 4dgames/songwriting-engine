@@ -620,9 +620,8 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
         generatedSongRef.current = song;
         setChatDone(true);
         if (!isUpdate) {
-          // First time — auto-start audio generation in the parent
-          setAudioRequested(true);
-          onSongReadyRef.current(song, true);
+          // First time — show sections for review; user triggers audio when ready
+          onSongReadyRef.current(song, false);
         } else {
           // Resumed conversation — update the parent's song silently
           onSongReadyRef.current(song, false);
