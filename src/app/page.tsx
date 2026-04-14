@@ -139,6 +139,7 @@ export default function Home() {
           </div>
           <span className="text-[#676767] text-[20px] font-normal tracking-normal mr-6">classroom</span>
           <div className="w-px self-stretch my-4 bg-[#d4d4d4] mr-6 flex-shrink-0" />
+          <span className="text-[#929292] text-sm font-normal ml-auto">Prototype by Gabe Turow</span>
         </div>
         <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-[#d4d4d4]" />
       </header>
