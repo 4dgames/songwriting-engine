@@ -19,54 +19,76 @@ interface Props {
   onSectionClick: (index: number) => void;
 }
 
-// ── Per-section mini waveform ─────────────────────────────────────────────────
+// ── Full-song waveform canvas ────────────────────────────────────────────────
 
-interface SectionCanvasProps {
-  slice: number[];           // peaks for just this section
-  sectionProgress: number;   // 0–1 playhead position within this section
+interface WaveformCanvasProps {
+  peaks: number[];
+  currentRatio: number;       // 0–1 playhead position within full song
   zoom: number;
+  sectionMarkers: SectionMarker[];
+  onSeek: (ratio: number) => void;
 }
 
-function SectionCanvas({ slice, sectionProgress, zoom }: SectionCanvasProps) {
+function WaveformCanvas({ peaks, currentRatio, zoom, sectionMarkers, onSeek }: WaveformCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  // Higher resolution canvas when zoomed in for crisp rendering
-  const resolution = Math.round(800 * Math.max(1, zoom));
+  const resolution = Math.round(1600 * Math.max(1, zoom));
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx   = canvas.getContext('2d')!;
+    const ctx = canvas.getContext('2d')!;
     const { width: w, height: h } = canvas;
-    const mid   = h / 2;
+    const mid = h / 2;
     ctx.clearRect(0, 0, w, h);
 
-    if (slice.length === 0) {
+    // Draw alternating section backgrounds
+    sectionMarkers.forEach((m, i) => {
+      const endRatio = sectionMarkers[i + 1]?.ratio ?? 1;
+      const x0 = Math.floor(m.ratio * w);
+      const x1 = Math.ceil(endRatio * w);
+      ctx.fillStyle = i % 2 === 0 ? '#f9f9f9' : '#f0f0f0';
+      ctx.fillRect(x0, 0, x1 - x0, h);
+    });
+
+    // Draw waveform bars
+    if (peaks.length > 0) {
+      const playedX = Math.max(0, Math.min(w, Math.round(currentRatio * w)));
+      for (let i = 0; i < w; i++) {
+        const idx  = Math.floor((i / w) * peaks.length);
+        const barH = Math.max(2, (peaks[idx] ?? 0) * h * 0.88);
+        ctx.fillStyle = i < playedX ? '#f37321' : '#c8c8c8';
+        ctx.fillRect(i, mid - barH / 2, 1, barH);
+      }
+      // Playhead
+      ctx.fillStyle = '#f37321';
+      ctx.fillRect(Math.min(Math.round(currentRatio * w), w - 2), 0, 2, h);
+    } else {
       ctx.fillStyle = '#e9e9e9';
       ctx.fillRect(0, mid - 1, w, 2);
-      return;
     }
 
-    const playedX = Math.max(0, Math.min(w, Math.round(sectionProgress * w)));
+    // Section divider lines
+    sectionMarkers.forEach(m => {
+      if (m.ratio === 0) return;
+      const x = Math.round(m.ratio * w);
+      ctx.fillStyle = '#bdbdbd';
+      ctx.fillRect(x, 0, 1, h);
+    });
+  }, [peaks, currentRatio, zoom, sectionMarkers]);
 
-    for (let i = 0; i < w; i++) {
-      const idx  = Math.floor((i / w) * slice.length);
-      const barH = Math.max(2, (slice[idx] ?? 0) * h * 0.88);
-      ctx.fillStyle = i < playedX ? '#f37321' : '#d4d4d4';
-      ctx.fillRect(i, mid - barH / 2, 1, barH);
-    }
-
-    // Playhead line
-    ctx.fillStyle = '#f37321';
-    ctx.fillRect(Math.min(playedX, w - 2), 0, 2, h);
-  }, [slice, sectionProgress, resolution]);
+  const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    onSeek((e.clientX - rect.left) / rect.width);
+  };
 
   return (
     <canvas
       ref={canvasRef}
       width={resolution}
-      height={96}
-      className="w-full"
-      style={{ height: 96, display: 'block' }}
+      height={128}
+      className="w-full cursor-crosshair"
+      style={{ height: 128, display: 'block' }}
+      onClick={handleClick}
     />
   );
 }
@@ -84,43 +106,22 @@ export default function SheetMusicView({
   onSeek,
   onSectionClick,
 }: Props) {
-  const [zoom, setZoom] = useState(1);
+  const [zoom, setZoom] = useState(3);
 
-  // One scroll-container ref per section index
-  const scrollRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Precompute per-section peak slices (only recomputed when peaks or markers change)
-  const sectionSlices = useMemo(() => {
-    const n = peaks.length || 1;
-    return sectionMarkers.map((m, i) => {
-      const endRatio = sectionMarkers[i + 1]?.ratio ?? 1;
-      const startI   = Math.floor(m.ratio * n);
-      const endI     = Math.ceil(endRatio * n);
-      return peaks.slice(startI, endI);
-    });
-  }, [peaks, sectionMarkers]);
+  // Current playback ratio (0–1 of full song)
+  const currentRatio = audioDurationMs > 0 ? currentTimeMs / audioDurationMs : 0;
 
-  // Auto-scroll the active section's waveform to keep the playhead centred
+  // Auto-scroll to keep playhead centred when zoomed
   useEffect(() => {
-    if (zoom <= 1) return;
-    for (let i = 0; i < sectionMarkers.length; i++) {
-      const marker   = sectionMarkers[i];
-      const endRatio = sectionMarkers[i + 1]?.ratio ?? 1;
-      const startMs  = marker.ratio * audioDurationMs;
-      const endMs    = endRatio * audioDurationMs;
-      if (currentTimeMs < startMs || currentTimeMs >= endMs) continue;
-
-      const el = scrollRefs.current.get(i);
-      if (!el) break;
-
-      const sectionProgress = (currentTimeMs - startMs) / Math.max(1, endMs - startMs);
-      const totalW = el.scrollWidth;
-      const viewW  = el.clientWidth;
-      const playheadX = sectionProgress * totalW;
-      el.scrollLeft = Math.max(0, Math.min(playheadX - viewW / 2, totalW - viewW));
-      break;
-    }
-  }, [currentTimeMs, zoom, audioDurationMs, sectionMarkers]);
+    if (zoom <= 1 || !scrollRef.current) return;
+    const el = scrollRef.current;
+    const totalW = el.scrollWidth;
+    const viewW  = el.clientWidth;
+    const playheadX = currentRatio * totalW;
+    el.scrollLeft = Math.max(0, Math.min(playheadX - viewW / 2, totalW - viewW));
+  }, [currentRatio, zoom]);
 
   if (sectionMarkers.length === 0) {
     return (
@@ -129,6 +130,22 @@ export default function SheetMusicView({
       </div>
     );
   }
+
+  // Section label positions (ratio → percentage)
+  const labelPositions = sectionMarkers.map((m, i) => {
+    const endRatio = sectionMarkers[i + 1]?.ratio ?? 1;
+    const midRatio = (m.ratio + endRatio) / 2;
+    return { label: m.label, ratio: m.ratio, midRatio, index: i };
+  });
+
+  // Active section based on current time
+  const activeSectionByTime = useMemo(() => {
+    if (audioDurationMs === 0) return null;
+    for (let i = sectionMarkers.length - 1; i >= 0; i--) {
+      if (currentTimeMs >= sectionMarkers[i].ratio * audioDurationMs) return i;
+    }
+    return null;
+  }, [currentTimeMs, audioDurationMs, sectionMarkers]);
 
   return (
     <div className="flex flex-col gap-3">
@@ -145,8 +162,8 @@ export default function SheetMusicView({
         </button>
         <span className="text-xs text-[#3b3b3b] w-8 text-center tabular-nums">{zoom}×</span>
         <button
-          onClick={() => setZoom(z => Math.min(4, parseFloat((z + 0.5).toFixed(1))))}
-          disabled={zoom >= 4}
+          onClick={() => setZoom(z => Math.min(8, parseFloat((z + 0.5).toFixed(1))))}
+          disabled={zoom >= 8}
           className="w-6 h-6 flex items-center justify-center rounded border border-[#e9e9e9] bg-white text-[#676767] hover:border-[#bdbdbd] hover:text-[#3b3b3b] disabled:opacity-30 disabled:cursor-not-allowed transition-colors text-sm font-bold leading-none"
           title="Zoom in"
         >
@@ -154,159 +171,94 @@ export default function SheetMusicView({
         </button>
       </div>
 
-      {sections.map((section, i) => {
-        const marker    = sectionMarkers[i];
-        if (!marker) return null;
+      {/* ── Continuous waveform with section overlays ── */}
+      <div
+        ref={scrollRef}
+        className="rounded-xl border border-[#e9e9e9] overflow-x-auto relative bg-white"
+        style={{ scrollbarWidth: 'none' }}
+      >
+        <div style={{ width: zoom > 1 ? `${zoom * 100}%` : '100%', minWidth: '100%', position: 'relative' }}>
 
-        const endRatio   = sectionMarkers[i + 1]?.ratio ?? 1;
-        const startMs    = marker.ratio * audioDurationMs;
-        const endMs      = endRatio * audioDurationMs;
-        const durationMs = Math.max(1, endMs - startMs);
-
-        const isActive  = activeSectionIndex === i;
-        const isPast    = currentTimeMs >= endMs;
-        const isCurrent = currentTimeMs >= startMs && currentTimeMs < endMs;
-
-        const sectionProgress = isCurrent
-          ? (currentTimeMs - startMs) / durationMs
-          : isPast ? 1 : 0;
-
-        // Words that fall within this section's time window
-        const sectionWords = wordTimestamps.filter(
-          w => w.start_ms >= startMs - 50 && w.start_ms < endMs
-        );
-
-        // Font scale tied to zoom
-        const lyricsFontSize = Math.round(11 * Math.sqrt(zoom));
-
-        return (
-          <div
-            key={i}
-            className={`rounded-xl border transition-all duration-200 overflow-hidden ${
-              isActive
-                ? 'border-[#f37321] shadow-[0_0_0_2px_rgba(243,115,33,0.10)]'
-                : 'border-[#e9e9e9] hover:border-[#bdbdbd]'
-            }`}
-            style={{ background: isActive ? '#fffaf6' : '#ffffff' }}
-          >
-            {/* ── Staff header ── */}
-            <div
-              className="flex items-center justify-between gap-4 px-4 pt-3 pb-1 cursor-pointer select-none"
-              onClick={() => { onSectionClick(i); onSeek(marker.ratio); }}
-            >
-              <div className="flex items-center gap-2 min-w-0">
-                {/* Playing indicator */}
-                <span className={`w-2 h-2 rounded-full flex-shrink-0 transition-colors ${
-                  isCurrent ? 'bg-[#f37321] animate-pulse' : 'bg-transparent border border-[#d4d4d4]'
-                }`} />
-                <span className={`text-xs font-bold uppercase tracking-widest truncate ${
-                  isActive ? 'text-[#f37321]' : isPast ? 'text-[#929292]' : 'text-[#3b3b3b]'
-                }`}>
-                  {marker.label}
-                </span>
-                {section.mood && (
-                  <span className="text-[10px] text-[#929292] italic truncate hidden sm:block">
-                    {section.mood}
-                  </span>
-                )}
-              </div>
-
-              {/* Chord symbols */}
-              {section.chords.length > 0 && (
-                <div className="flex items-center gap-1 flex-shrink-0 flex-wrap justify-end">
-                  {section.chords.map((chord, ci) => (
-                    <span
-                      key={ci}
-                      className={`text-[11px] font-bold font-mono px-1.5 py-0.5 rounded transition-colors ${
-                        isActive
-                          ? 'bg-[#fff0e6] text-[#f37321]'
-                          : 'bg-[#f6f6f6] text-[#676767]'
-                      }`}
-                    >
-                      {chord}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* ── Scrollable waveform + lyrics area ── */}
-            <div
-              ref={el => {
-                if (el) scrollRefs.current.set(i, el);
-                else scrollRefs.current.delete(i);
-              }}
-              className="overflow-x-auto"
-              style={{ scrollbarWidth: 'none' }}
-            >
-              <div style={{ width: zoom > 1 ? `${zoom * 100}%` : '100%', minWidth: '100%' }}>
-
-                {/* Waveform */}
-                <div
-                  className="px-4 cursor-crosshair"
-                  onClick={e => {
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    const local = (e.clientX - rect.left) / rect.width;
-                    onSeek(marker.ratio + local * (endRatio - marker.ratio));
-                  }}
+          {/* Section name labels above waveform */}
+          <div className="relative h-6 select-none">
+            {labelPositions.map(({ label, ratio, index }) => {
+              const isCurrent = activeSectionByTime === index || activeSectionIndex === index;
+              return (
+                <button
+                  key={index}
+                  onClick={() => { onSectionClick(index); onSeek(ratio); }}
+                  style={{ left: `${ratio * 100}%` }}
+                  className={`absolute top-0 bottom-0 px-1.5 text-[9px] font-bold uppercase tracking-widest whitespace-nowrap transition-colors ${
+                    isCurrent ? 'text-[#f37321]' : 'text-[#929292] hover:text-[#3b3b3b]'
+                  }`}
                 >
-                  <SectionCanvas
-                    slice={sectionSlices[i] ?? []}
-                    sectionProgress={sectionProgress}
-                    zoom={zoom}
-                  />
-                </div>
-
-                {/* Lyrics */}
-                <div className="px-4 pb-3 pt-1.5">
-                  {sectionWords.length > 0 ? (
-                    // Timestamp-aligned lyrics: words revealed only when it's time to sing them.
-                    <div className="relative select-none overflow-hidden" style={{ height: lyricsFontSize * 2.2 }}>
-                      {sectionWords.map((w, wi) => {
-                        const leftPct   = ((w.start_ms - startMs) / durationMs) * 100;
-                        const isSung    = currentTimeMs > w.end_ms;
-                        const isSinging = currentTimeMs >= w.start_ms && currentTimeMs <= w.end_ms;
-                        const isVisible = isSinging || isSung;
-                        return (
-                          <span
-                            key={wi}
-                            style={{ left: `${Math.min(98, leftPct)}%`, fontSize: lyricsFontSize }}
-                            onClick={e => {
-                              e.stopPropagation();
-                              onSeek(w.start_ms / audioDurationMs);
-                            }}
-                            className={`absolute whitespace-nowrap cursor-pointer leading-none transition-all duration-100 ${
-                              !isVisible
-                                ? 'opacity-0'
-                                : isSinging
-                                ? 'text-[#f37321] font-bold underline underline-offset-2 decoration-[#f37321] opacity-100'
-                                : 'text-[#c4c4c4] opacity-100'
-                            }`}
-                          >
-                            {w.word}
-                          </span>
-                        );
-                      })}
-                    </div>
-                  ) : section.lyrics.trim() ? (
-                    // Fallback: plain text when no timestamps available (e.g. MusicGen)
-                    <div className="flex flex-col gap-0.5">
-                      {section.lyrics.split('\n').map((line, li) => (
-                        <p key={li} style={{ fontSize: lyricsFontSize }} className={`leading-relaxed ${
-                          isActive ? 'text-[#3b3b3b]' : 'text-[#929292]'
-                        }`}>
-                          {line.trim()}
-                        </p>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-
-              </div>
-            </div>
+                  {label}
+                </button>
+              );
+            })}
           </div>
-        );
-      })}
+
+          {/* Waveform */}
+          <WaveformCanvas
+            peaks={peaks}
+            currentRatio={currentRatio}
+            zoom={zoom}
+            sectionMarkers={sectionMarkers}
+            onSeek={onSeek}
+          />
+
+          {/* Lyrics track — words appear at their time position */}
+          {wordTimestamps.length > 0 && audioDurationMs > 0 && (
+            <div
+              className="relative select-none overflow-hidden"
+              style={{ height: 22 }}
+            >
+              {wordTimestamps.map((w, wi) => {
+                const leftPct  = (w.start_ms / audioDurationMs) * 100;
+                const isSung   = currentTimeMs > w.end_ms;
+                const isSinging = currentTimeMs >= w.start_ms && currentTimeMs <= w.end_ms;
+                const isVisible = isSinging || isSung;
+                return (
+                  <span
+                    key={wi}
+                    style={{ left: `${Math.min(99, leftPct)}%`, fontSize: 10 }}
+                    onClick={e => { e.stopPropagation(); onSeek(w.start_ms / audioDurationMs); }}
+                    className={`absolute whitespace-nowrap cursor-pointer leading-none transition-all duration-75 ${
+                      !isVisible
+                        ? 'opacity-0'
+                        : isSinging
+                        ? 'text-[#f37321] font-bold opacity-100'
+                        : 'text-[#bdbdbd] opacity-100'
+                    }`}
+                  >
+                    {w.word}
+                  </span>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Section chips (click to jump) ── */}
+      <div className="flex flex-wrap gap-1.5">
+        {sectionMarkers.map((m, i) => {
+          const isCurrent = activeSectionByTime === i || activeSectionIndex === i;
+          return (
+            <button
+              key={i}
+              onClick={() => { onSectionClick(i); onSeek(m.ratio); }}
+              className={`px-2.5 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wider transition-colors ${
+                isCurrent
+                  ? 'bg-[#f37321] text-white'
+                  : 'bg-[#f6f6f6] text-[#929292] hover:bg-[#e9e9e9] hover:text-[#3b3b3b]'
+              }`}
+            >
+              {m.label}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
