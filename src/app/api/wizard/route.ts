@@ -24,7 +24,7 @@ SONG_JSON_START
 { ...song JSON... }
 SONG_JSON_END
 
-Then on the next line add exactly: "I've sketched out your song — want to hear it, or would you like to tweak anything first?"
+After the closing SONG_JSON_END marker, on the next line write exactly one short sentence like: "I'm building your song now — hang tight!" (vary the wording slightly each time, keep it excited and short).
 
 SONG JSON SCHEMA (output valid JSON with no trailing commas)
 {

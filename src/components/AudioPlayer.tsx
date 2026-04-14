@@ -41,6 +41,7 @@ interface Props {
   instrumentStems?: { drums: string; bass: string; other: string } | null;
   onSeparateInstruments?: () => void;
   separatingInstruments?: boolean;
+  playTrigger?: number; // increment to programmatically start playback
 }
 
 export default function AudioPlayer({
@@ -49,6 +50,7 @@ export default function AudioPlayer({
   onRegenerateVocals, onRegenerateInstrumental, regeneratingVocals, regeneratingInstrumental,
   onViewLayoutChange,
   instrumentStems, onSeparateInstruments, separatingInstruments,
+  playTrigger,
 }: Props) {
   const audioRef  = useRef<HTMLAudioElement>(null);
   const vocalsRef = useRef<HTMLAudioElement>(null);
@@ -105,6 +107,13 @@ export default function AudioPlayer({
 
   // Reset cached peaks whenever the track changes
   useEffect(() => { setPeaks([]); }, [currentInstrumentalUrl]);
+
+  // Programmatic play via playTrigger prop (e.g. from wizard "play my song")
+  useEffect(() => {
+    if (!playTrigger || !audioRef.current || playing) return;
+    void toggle();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playTrigger]);
 
   // Decode 800-sample peaks when the user switches to sheet layout
   useEffect(() => {

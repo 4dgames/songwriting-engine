@@ -58,6 +58,8 @@ export default function Home() {
   const [progress,        setProgress]        = useState(0);
   const [progressLabel,   setProgressLabel]   = useState('');
   const [viewLayout,      setViewLayout]      = useState<'waveform' | 'sheet'>('waveform');
+  const [playRequestCount, setPlayRequestCount] = useState(0);
+  const [audioReadyCount,  setAudioReadyCount]  = useState(0);
   const crawlRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -174,9 +176,13 @@ export default function Home() {
           {/* ── Centred ½-width input column ── */}
           <div className="flex flex-col gap-3 w-1/2 min-w-72 mx-auto">
 
-            {inputMode === 'wizard' && !song ? (
-              <SongWizard onSongReady={handleWizardSongReady} />
-            ) : inputMode === 'prompt' || song ? (
+            {inputMode === 'wizard' ? (
+              <SongWizard
+                onSongReady={handleWizardSongReady}
+                onPlayRequest={() => setPlayRequestCount(c => c + 1)}
+                audioReadyCount={audioReadyCount}
+              />
+            ) : (
               <>
                 {/* Describe your song — display or input */}
                 {showPromptDisplay ? (
@@ -199,7 +205,7 @@ export default function Home() {
                       </button>
                     </div>
                   </div>
-                ) : inputMode === 'prompt' && !song ? (
+                ) : !song ? (
                   <PromptInput
                     onCompose={handleSubmitPrompt}
                     loading={loading}
@@ -259,7 +265,7 @@ export default function Home() {
                   </>
                 )}
               </>
-            ) : null}
+            )}
           </div>
 
           {/* ── Full-width song editor ── */}
@@ -272,6 +278,8 @@ export default function Home() {
               melodyUrl={melodyUrl}
               autoGenerate={autoGenerate}
               onViewLayoutChange={setViewLayout}
+              playRequestCount={playRequestCount}
+              onAudioReady={() => setAudioReadyCount(c => c + 1)}
             />
           )}
         </div>
