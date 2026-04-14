@@ -285,7 +285,8 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
   const [recording,     setRecording]     = useState(false);
   const [speechSupported, setSpeechSupported] = useState(false);
   const [generatedSong, setGeneratedSong] = useState<Song | null>(null);
-  const [chatDone,      setChatDone]      = useState(false);
+  const [chatDone,       setChatDone]       = useState(false);
+  const [audioRequested, setAudioRequested] = useState(false);
   const [composingJson,       setComposingJson]       = useState(false);
   const [jsonProgress,        setJsonProgress]        = useState(5);
   const [jsonProgressLabel,   setJsonProgressLabel]   = useState('Starting…');
@@ -499,6 +500,7 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
                     || /\b(play it|play now|play the song)\b/i.test(trimmed);
     if (playIntent && hasSongRef.current && generatedSongRef.current) {
       // Song is built — trigger audio generation / playback
+      setAudioRequested(true);
       onPlayRequestRef.current?.();
       setInputText('');
       const reply = 'On it! Generating the audio now…';
@@ -619,6 +621,7 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
         setChatDone(true);
         if (!isUpdate) {
           // First time — auto-start audio generation in the parent
+          setAudioRequested(true);
           onSongReadyRef.current(song, true);
         } else {
           // Resumed conversation — update the parent's song silently
@@ -839,8 +842,8 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
 
       </div>
 
-      {/* ── Action bar (shown when song is ready) ── */}
-      {chatDone && !loading && generatedSong && (
+      {/* ── Action bar (shown when song is ready but audio not yet requested) ── */}
+      {chatDone && !loading && generatedSong && !audioRequested && (
         <div className="border-t border-[#e9e9e9] px-4 py-3 flex items-center gap-2 bg-[#fffaf6] flex-wrap">
           <button
             onClick={() => setChatDone(false)}
@@ -856,7 +859,7 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
             Edit song
           </button>
           <button
-            onClick={() => onSongReady(generatedSong, true)}
+            onClick={() => { setAudioRequested(true); onSongReady(generatedSong, true); }}
             className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[#f37321] hover:bg-[#da6520] text-white text-sm font-semibold transition-colors shadow-[0_2px_4px_rgba(243,115,33,0.3)]"
           >
             <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
