@@ -869,6 +869,22 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
         </div>
       )}
 
+      {/* ── Compose Song button — shown after enough exchanges, before song exists ── */}
+      {started && !chatDone && !composingJson && !generatedSong && messages.length >= 4 && (
+        <div className="border-t border-[#e9e9e9] px-4 py-2.5 flex justify-end bg-[#fffaf6]">
+          <button
+            onClick={() => void doSendMessage('Yes, please compose my song!')}
+            disabled={loading}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[#f37321] hover:bg-[#da6520] disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors shadow-[0_2px_4px_rgba(243,115,33,0.3)]"
+          >
+            <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+              <path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/>
+            </svg>
+            Compose Song
+          </button>
+        </div>
+      )}
+
       {/* ── Input area ── */}
       <div className={`border-t border-[#e9e9e9] p-3 flex items-end gap-2 transition-opacity ${inputDisabled ? 'opacity-40 pointer-events-none' : ''}`}>
         <textarea
@@ -917,7 +933,7 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
       {/* Composing song — floating fixed overlay */}
       {composingJson && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
-          <div className="rounded-xl border border-[#e9e9e9] bg-white p-6 shadow-[0_8px_40px_rgba(0,0,0,0.18)] w-80">
+          <div className="rounded-xl border border-[#e9e9e9] bg-white p-6 shadow-[0_8px_40px_rgba(0,0,0,0.18)] w-[640px] max-w-[90vw]">
             <div className="flex items-center justify-between mb-3">
               <span className="font-semibold text-[#3b3b3b]">Writing Your Song</span>
               <span className="text-sm tabular-nums text-[#929292]">{Math.round(jsonProgress)}%</span>

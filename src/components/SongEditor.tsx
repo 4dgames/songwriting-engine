@@ -807,7 +807,7 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
       {/* Audio generation progress — floating fixed overlay */}
       {(generating || separating || separatingInstruments) && (
         <div id="audio-generation-progress" className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
-          <div className="rounded-xl border border-[#e9e9e9] bg-white p-6 shadow-[0_8px_40px_rgba(0,0,0,0.18)] w-80">
+          <div className="rounded-xl border border-[#e9e9e9] bg-white p-6 shadow-[0_8px_40px_rgba(0,0,0,0.18)] w-[640px] max-w-[90vw]">
             {generating ? (
               <>
                 <div className="flex items-center justify-between mb-3">

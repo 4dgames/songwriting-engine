@@ -283,7 +283,7 @@ export default function Home() {
       {/* Song composing progress — fixed overlay */}
       {loading && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
-          <div className="rounded-xl border border-[#e9e9e9] bg-white p-6 shadow-[0_8px_40px_rgba(0,0,0,0.18)] w-80">
+          <div className="rounded-xl border border-[#e9e9e9] bg-white p-6 shadow-[0_8px_40px_rgba(0,0,0,0.18)] w-[640px] max-w-[90vw]">
             <div className="flex items-center justify-between mb-3">
               <span className="font-semibold text-[#3b3b3b]">Creating Your Song</span>
               <span className="text-sm tabular-nums text-[#929292]">{Math.round(progress)}%</span>
