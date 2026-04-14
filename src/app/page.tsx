@@ -179,8 +179,9 @@ export default function Home() {
           {/* ── Centred ½-width input column ── */}
           <div className="flex flex-col gap-3 w-1/2 min-w-72 mx-auto">
 
-            {inputMode === 'wizard' ? (
-              <>
+            {/* Wizard mode — always mounted to preserve chat state */}
+            <div className={inputMode === 'wizard' ? '' : 'hidden'}>
+              <div className="flex flex-col gap-3">
                 <SongWizard
                   onSongReady={handleWizardSongReady}
                   onPlayRequest={() => setPlayRequestCount(c => c + 1)}
@@ -248,8 +249,11 @@ export default function Home() {
                     </div>
                   </>
                 )}
-              </>
-            ) : (
+              </div>
+            </div>
+
+            {/* Prompt mode */}
+            <div className={inputMode === 'prompt' ? 'flex flex-col gap-3' : 'hidden'}>
               <>
                 {/* Describe your song — display or input */}
                 {showPromptDisplay ? (
@@ -336,7 +340,7 @@ export default function Home() {
                   </>
                 )}
               </>
-            )}
+            </div>
           </div>
 
           {/* ── Full-width song editor ── */}

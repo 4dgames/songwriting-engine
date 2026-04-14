@@ -659,35 +659,12 @@ export default function AudioPlayer({
           </div>
         )}
 
-        {/* ── Instrument stems (waveform mode only) ── */}
-        {viewLayout === 'waveform' && onSeparateInstruments && (
+        {/* ── Instrument stems — only shown after separation is complete ── */}
+        {viewLayout === 'waveform' && instrumentStems && (
           <div className="border-t border-[#e9e9e9] pt-3 flex flex-col gap-1">
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-[10px] font-semibold text-[#929292] uppercase tracking-wider">Instrument Tracks</span>
-              <button
-                onClick={onSeparateInstruments}
-                disabled={separatingInstruments}
-                className="flex items-center gap-1.5 px-2 py-1 rounded text-[10px] font-semibold border border-[#e9e9e9] bg-[#f6f6f6] hover:border-[#f37321] hover:text-[#f37321] text-[#929292] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              >
-                {separatingInstruments ? (
-                  <><span className="inline-block w-3 h-3 rounded-full border-2 border-[#bdbdbd] border-t-[#f37321] animate-spin" />Separating…</>
-                ) : (
-                  <><svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
-                  </svg>{instrumentStems ? 'Re-separate' : 'Separate Instruments'}</>
-                )}
-              </button>
-            </div>
-            {!instrumentStems && !separatingInstruments && (
-              <p className="text-[10px] text-[#929292]">This can take up to a minute.</p>
-            )}
-            {instrumentStems && (
-              <>
-                <StemTrackRow label="Drums" audioUrl={instrumentStems.drums} />
-                <StemTrackRow label="Bass"  audioUrl={instrumentStems.bass}  />
-                <StemTrackRow label="Other" audioUrl={instrumentStems.other} />
-              </>
-            )}
+            <StemTrackRow label="Drums" audioUrl={instrumentStems.drums} />
+            <StemTrackRow label="Bass"  audioUrl={instrumentStems.bass}  />
+            <StemTrackRow label="Other" audioUrl={instrumentStems.other} />
           </div>
         )}
 

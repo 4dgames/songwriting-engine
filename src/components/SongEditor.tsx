@@ -625,7 +625,7 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
   return (
     <div className="flex flex-col gap-6">
 
-      {/* Sections — collapsible, shown above waveform, hidden in sheet mode */}
+      {/* Sections — collapsible, above waveform, hidden in sheet mode */}
       {sectionsOpen && activeViewLayout !== 'sheet' && (
         <div className="flex flex-col gap-3">
           <div className="flex items-center justify-between">
@@ -641,7 +641,6 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
             </button>
           </div>
 
-          {/* Section cards */}
           <div className="grid grid-cols-3 lg:grid-cols-4 gap-4">
             {song.sections.map((section, i) => {
               const isDragging = dragIndex === i;
@@ -684,7 +683,6 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
               );
             })}
 
-            {/* Add section button */}
             <button
               onClick={() => insertSection(song.sections.length - 1)}
               className="rounded-lg border-2 border-dashed border-[#bdbdbd] hover:border-[#f37321] text-[#929292] hover:text-[#f37321] flex items-center justify-center text-2xl transition-colors min-h-[80px]"
@@ -774,6 +772,7 @@ export default function SongEditor({ song: initial, audioPrompt, onAudioPromptCh
               </button>
             </div>
           )}
+
         </div>
       )}
 
