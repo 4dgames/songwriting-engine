@@ -28,3 +28,8 @@ body {
   background-color: var(--amp-bg);
   color: var(--amp-text);
 }
+
+@keyframes countdownPop {
+  from { transform: scale(1.4); opacity: 0.4; }
+  to   { transform: scale(1);   opacity: 1; }
+}

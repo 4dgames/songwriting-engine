@@ -6,6 +6,46 @@
  * Used to combine Demucs stems (drums + bass + other) into a single instrumental track.
  */
 
+export async function mixTracksWithVolumes(tracks: { url: string; volume: number }[]): Promise<string> {
+  const ctx     = new AudioContext();
+  const buffers = await Promise.all(
+    tracks.map(t =>
+      fetch(t.url)
+        .then(r => r.arrayBuffer())
+        .then(ab => ctx.decodeAudioData(ab)),
+    ),
+  );
+  await ctx.close();
+
+  const maxLen         = Math.max(...buffers.map(b => b.length));
+  const { sampleRate, numberOfChannels } = buffers[0];
+  const out = new AudioBuffer({ numberOfChannels, length: maxLen, sampleRate });
+
+  for (let ch = 0; ch < numberOfChannels; ch++) {
+    const data = out.getChannelData(ch);
+    for (let ti = 0; ti < tracks.length; ti++) {
+      const buf = buffers[ti];
+      const vol = tracks[ti].volume;
+      const src = buf.getChannelData(Math.min(ch, buf.numberOfChannels - 1));
+      for (let i = 0; i < src.length; i++) data[i] += src[i] * vol;
+    }
+  }
+
+  let peak = 0;
+  for (let ch = 0; ch < numberOfChannels; ch++) {
+    const data = out.getChannelData(ch);
+    for (let i = 0; i < data.length; i++) peak = Math.max(peak, Math.abs(data[i]));
+  }
+  if (peak > 1) {
+    for (let ch = 0; ch < numberOfChannels; ch++) {
+      const data = out.getChannelData(ch);
+      for (let i = 0; i < data.length; i++) data[i] /= peak;
+    }
+  }
+
+  return encodeWav(out);
+}
+
 export async function mixTracks(urls: string[]): Promise<string> {
   const ctx     = new AudioContext();
   const buffers = await Promise.all(
@@ -53,7 +93,7 @@ export async function toBlobUrl(url: string): Promise<string> {
   return URL.createObjectURL(blob);
 }
 
-function encodeWav(buffer: AudioBuffer): string {
+export function encodeWav(buffer: AudioBuffer): string {
   const { numberOfChannels, sampleRate, length } = buffer;
   const pcmSize = length * numberOfChannels * 2;
   const ab      = new ArrayBuffer(44 + pcmSize);

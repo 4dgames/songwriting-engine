@@ -61,11 +61,11 @@ export async function POST(req: NextRequest) {
     new Blob([melodyBuf], { type: mimeType }),
   );
 
-  const output = await replicate.run('meta/musicgen', {
+  const output = await replicate.run('meta/musicgen:b05b1dff1d8c6dc63d14b0cdb42135378dcb87f6373b0d3d341ede46e59e2b38', {
     input: {
       prompt:               buildPrompt(song),
-      melody:               melodyFile.urls.get,
-      model_version:        'stereo-melody',
+      input_audio:          melodyFile.urls.get,
+      model_version:        'stereo-melody-large',
       duration:             estimateDurationSec(song),
       output_format:        'mp3',
       normalization_strategy: 'peak',
