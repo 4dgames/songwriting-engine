@@ -1,0 +1,8 @@
+# Copy this file to terraform.tfvars and fill in real values.
+# terraform.tfvars is gitignored — never commit secrets.
+
+github_access_token = "ghp_..."          # GitHub PAT
+anthropic_api_key   = "sk-ant-..."       # Anthropic API key
+suno_api_key        = ""                 # Leave blank to use mock audio provider
+nextauth_secret     = ""                 # openssl rand -base64 32
+nextauth_url        = "https://main.REPLACE_AFTER_FIRST_DEPLOY.amplifyapp.com"

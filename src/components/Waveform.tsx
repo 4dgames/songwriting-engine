@@ -164,7 +164,7 @@ export default function Waveform({ audioUrl, progress, onSeek, sectionMarkers = 
       )}
 
       {/* Waveform canvas */}
-      <div className="relative w-full h-16">
+      <div className="relative w-full h-24">
         {loading && (
           <div className="absolute inset-0 flex items-center justify-center text-xs text-[#929292]">
             Loading waveform…

@@ -9,13 +9,15 @@ interface Props {
   index: number;
   tempo: number;
   onChange: (index: number, updated: SongSection) => void;
-  onRegenerate?: () => void;
+  onRegenerate?: (mode: 'vocals' | 'instruments' | 'both') => void;
   regenerating?: boolean;
+  isNewSection?: boolean;
   onInsertAfter?: () => void;
   onDelete?: () => void;
   sectionTakes?: SectionTake[];
   onRestoreTake?: (take: SectionTake) => void;
   isPlaying?: boolean;
+  onPlay?: () => void;
 }
 
 function VocalistAvatar({ name, color, colorLight }: { name: string; color: string; colorLight: string }) {
@@ -47,15 +49,19 @@ function msToBars(ms: number, tempo: number): number {
 function barsToMs(bars: number, tempo: number): number {
   return Math.round(bars * 240000 / tempo);
 }
-function estimateDurationBars(lyrics: string, tempo: number): number {
-  const lines = lyrics.split('\n').map(l => l.trim()).filter(Boolean);
-  if (lines.length === 0) return 4;
-  return Math.max(4, Math.round(msToBars(lines.length * 3500 + 4000, tempo)));
+/** Round bars to nearest multiple of 2, with 1 as the only allowed odd value. */
+function roundToBars(bars: number): number {
+  if (bars <= 1) return 1;
+  return Math.max(2, Math.round(bars / 2) * 2);
+}
+function estimateDurationBars(_lyrics: string, _tempo: number): number {
+  return 8;
 }
 
-export default function SectionEditor({ section, index, tempo, onChange, onRegenerate, regenerating, onInsertAfter, onDelete, sectionTakes, onRestoreTake, isPlaying }: Props) {
+export default function SectionEditor({ section, index, tempo, onChange, onRegenerate, regenerating, isNewSection, onInsertAfter, onDelete, sectionTakes, onRestoreTake, isPlaying, onPlay }: Props) {
   const [chordsOpen, setChordsOpen] = useState(false);
   const [vocalistOpen, setVocalistOpen] = useState(false);
+  const [regenOpen, setRegenOpen] = useState(false);
   const update = (patch: Partial<SongSection>) => onChange(index, { ...section, ...patch });
 
   const instruments = section.instruments ?? [];
@@ -115,6 +121,40 @@ export default function SectionEditor({ section, index, tempo, onChange, onRegen
               Playing
             </span>
           )}
+          {onDelete && (
+            <button
+              type="button"
+              onClick={onDelete}
+              title="Delete section"
+              className="w-5 h-5 flex items-center justify-center rounded flex-shrink-0 text-[#bdbdbd] hover:text-red-500 hover:bg-red-50 transition-colors"
+            >
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          )}
+          {onPlay && (
+            <button
+              type="button"
+              onClick={onPlay}
+              title="Play from this section"
+              className={`w-6 h-6 flex items-center justify-center rounded-full flex-shrink-0 transition-colors ${
+                isPlaying
+                  ? 'bg-[#f37321] text-white'
+                  : 'bg-[#e9e9e9] hover:bg-[#f37321] text-[#676767] hover:text-white'
+              }`}
+            >
+              {isPlaying ? (
+                <svg className="w-2.5 h-2.5" fill="currentColor" viewBox="0 0 24 24">
+                  <rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" />
+                </svg>
+              ) : (
+                <svg className="w-2.5 h-2.5 ml-px" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M8 5v14l11-7z" />
+                </svg>
+              )}
+            </button>
+          )}
         </div>
         <div className="flex items-center gap-1.5 flex-wrap">
           {/* Duration override in bars */}
@@ -124,14 +164,17 @@ export default function SectionEditor({ section, index, tempo, onChange, onRegen
               min={1}
               max={Math.round(msToBars(120000, tempo))}
               step={1}
-              value={section.durationMs != null ? Math.round(msToBars(section.durationMs, tempo)) : ''}
+              value={section.durationMs != null ? roundToBars(Math.round(msToBars(section.durationMs, tempo))) : ''}
               onChange={e => {
                 const raw = e.target.value;
                 if (raw === '') {
                   update({ durationMs: undefined });
                 } else {
-                  const bars = Math.max(1, parseInt(raw, 10));
-                  if (!isNaN(bars)) update({ durationMs: barsToMs(bars, tempo) });
+                  const parsed = parseInt(raw, 10);
+                  if (!isNaN(parsed)) {
+                    const bars = roundToBars(Math.max(1, parsed));
+                    update({ durationMs: barsToMs(bars, tempo) });
+                  }
                 }
               }}
               placeholder={String(estimateDurationBars(section.lyrics, tempo))}
@@ -141,41 +184,60 @@ export default function SectionEditor({ section, index, tempo, onChange, onRegen
             <span className="text-[10px] text-[#929292] flex-shrink-0">bars</span>
           </div>
           <div className="flex-1" />
-          {onInsertAfter && (
-            <button
-              type="button"
-              onClick={onInsertAfter}
-              title="Add section below"
-              className="w-6 h-6 flex items-center justify-center rounded border border-[#bdbdbd] hover:border-[#f37321] text-[#929292] hover:text-[#f37321] transition-colors text-base leading-none"
-            >
-              +
-            </button>
-          )}
-          {onDelete && (
-            <button
-              type="button"
-              onClick={onDelete}
-              title="Delete section"
-              className="w-6 h-6 flex items-center justify-center rounded border border-[#bdbdbd] hover:border-red-400 text-[#929292] hover:text-red-500 transition-colors text-base leading-none"
-            >
-              −
-            </button>
-          )}
           {onRegenerate && (
-            <button
-              onClick={onRegenerate}
-              disabled={regenerating}
-              title={regenerating ? 'Regenerating…' : 'Regenerate section'}
-              className="w-6 h-6 flex items-center justify-center rounded border border-[#e9e9e9] bg-[#f6f6f6] hover:bg-[#e9e9e9] disabled:opacity-40 disabled:cursor-not-allowed text-[#464646] transition-colors"
-            >
-              {regenerating ? (
+            regenerating ? (
+              <span className="flex items-center gap-1 text-[10px] text-[#929292]">
                 <span className="inline-block w-3 h-3 rounded-full border-2 border-[#bdbdbd] border-t-[#f37321] animate-spin" />
-              ) : (
-                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                {isNewSection ? 'Generating…' : 'Regenerating…'}
+              </span>
+            ) : isNewSection ? (
+              <button
+                type="button"
+                onClick={() => onRegenerate('both')}
+                title="Generate this section"
+                className="flex items-center gap-1 px-2 py-0.5 rounded border border-[#f37321] bg-[#fff3eb] hover:bg-[#ffe5d0] text-[#f37321] text-[10px] font-semibold transition-colors flex-shrink-0"
+              >
+                <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
                 </svg>
-              )}
-            </button>
+                Generate
+              </button>
+            ) : (
+              <div className="relative flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setRegenOpen(o => !o)}
+                  title="Regenerate section"
+                  className="w-6 h-6 flex items-center justify-center rounded border border-[#e9e9e9] bg-[#f6f6f6] hover:bg-[#e9e9e9] text-[#464646] transition-colors"
+                >
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                </button>
+                {regenOpen && (
+                  <>
+                    {/* Backdrop to close on outside click */}
+                    <div className="fixed inset-0 z-10" onClick={() => setRegenOpen(false)} />
+                    <div className="absolute right-0 top-full mt-1 z-20 bg-white rounded-lg border border-[#e9e9e9] shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1 min-w-[140px]">
+                      {([
+                        ['vocals',      'Regenerate Vocals'],
+                        ['instruments', 'Regenerate Instruments'],
+                        ['both',        'Regenerate Both'],
+                      ] as const).map(([mode, label]) => (
+                        <button
+                          key={mode}
+                          type="button"
+                          onClick={() => { setRegenOpen(false); onRegenerate(mode); }}
+                          className="w-full text-left px-3 py-1.5 text-xs text-[#3b3b3b] hover:bg-[#fff3eb] hover:text-[#f37321] transition-colors"
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            )
           )}
           {sectionTakes && sectionTakes.length > 0 && onRestoreTake && (
             <select
@@ -197,16 +259,28 @@ export default function SectionEditor({ section, index, tempo, onChange, onRegen
         </div>
       </div>
 
-      {/* Mood */}
-      <div>
-        <label className="block text-xs text-[#929292] mb-1">Mood / Style</label>
-        <input
-          type="text"
-          value={section.mood ?? ''}
-          onChange={e => update({ mood: e.target.value })}
-          placeholder="e.g. tender and introspective"
-          className="w-full rounded bg-[#f6f6f6] border border-[#e9e9e9] text-[#3b3b3b] placeholder-[#929292] px-3 py-1.5 text-sm italic focus:outline-none focus:ring-1 focus:ring-[#f37321]"
-        />
+      {/* Mood + Style row */}
+      <div className="flex gap-2">
+        <div className="flex-1">
+          <label className="block text-xs text-[#929292] mb-1">Mood</label>
+          <input
+            type="text"
+            value={section.mood ?? ''}
+            onChange={e => update({ mood: e.target.value })}
+            placeholder="e.g. tender and introspective"
+            className="w-full rounded bg-[#f6f6f6] border border-[#e9e9e9] text-[#3b3b3b] placeholder-[#929292] px-3 py-1.5 text-sm italic focus:outline-none focus:ring-1 focus:ring-[#f37321]"
+          />
+        </div>
+        <div className="w-28 flex-shrink-0">
+          <label className="block text-xs text-[#929292] mb-1">Genre</label>
+          <input
+            type="text"
+            value={section.style ?? ''}
+            onChange={e => update({ style: e.target.value.toLowerCase() || undefined })}
+            placeholder="e.g. punk rock"
+            className="w-full rounded bg-[#f6f6f6] border border-[#e9e9e9] text-[#3b3b3b] placeholder-[#929292] px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-[#f37321]"
+          />
+        </div>
       </div>
 
       {/* Chords — collapsible */}

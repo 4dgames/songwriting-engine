@@ -9,11 +9,12 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { encodeWav } from '@/lib/audio/mix';
+import type { WordTimestamp } from '@/lib/types';
 
 // ── Layout ──────────────────────────────────────────────────────────────────
 const LABEL_W  = 140;
 const HEADER_H = 30;
-const TRACK_H  = 76;
+const TRACK_H  = 228;
 const PEAKS    = 2000;
 const MIN_ZOOM = 8;
 const MAX_ZOOM = 1000;
@@ -24,6 +25,7 @@ export interface TimelineTrack {
   label: string;
   url:   string;
   color: string; // hex
+  wordTimestamps?: WordTimestamp[];
 }
 
 interface DecodedTrack {
@@ -39,13 +41,13 @@ interface Region {
   endSec:   number;
   /** Non-null when the region has been dragged or a button was pressed */
   destSec:  number | null;
-  /** silence = cut-in-place (no paste); move = cut + paste; copy = keep original + paste */
-  opType:   'silence' | 'move' | 'copy' | null;
+  /** silence = cut-in-place (no paste); move = cut + paste; copy = keep original + paste; cut = remove + close gap; trim = keep only selection */
+  opType:   'silence' | 'move' | 'copy' | 'cut' | 'trim' | null;
 }
 
 export interface Props {
   tracks:  TimelineTrack[];
-  onApply: (updated: { id: string; url: string }[]) => void;
+  onApply: (updated: { id: string; url: string; timestamps?: WordTimestamp[] }[]) => void;
   onClose: () => void;
 }
 
@@ -64,6 +66,78 @@ function fmtSec(sec: number): string {
   const s = sec % 60;
   if (m > 0) return `${m}:${s < 10 ? '0' : ''}${s.toFixed(1)}`;
   return `${s.toFixed(1)}s`;
+}
+
+// ── Timestamp adjustment helpers ──────────────────────────────────────────────
+function adjustTimestampsForCut(ts: WordTimestamp[], cutStartMs: number, cutEndMs: number): WordTimestamp[] {
+  const regLenMs = cutEndMs - cutStartMs;
+  return ts.flatMap(w => {
+    if (w.end_ms <= cutStartMs)  return [w]; // before cut — unchanged
+    if (w.start_ms >= cutEndMs)  return [{ ...w, start_ms: w.start_ms - regLenMs, end_ms: w.end_ms - regLenMs }]; // after — shift left
+    if (w.start_ms < cutStartMs) return [{ ...w, end_ms: cutStartMs }]; // overlaps start — trim end
+    if (w.end_ms   > cutEndMs)   return [{ ...w, start_ms: cutStartMs, end_ms: w.end_ms - regLenMs }]; // overlaps end — trim start + shift
+    return []; // fully inside cut — drop
+  });
+}
+
+function adjustTimestampsForTrim(ts: WordTimestamp[], trimStartMs: number, trimEndMs: number): WordTimestamp[] {
+  return ts.flatMap(w => {
+    if (w.end_ms <= trimStartMs || w.start_ms >= trimEndMs) return []; // outside trim window — drop
+    return [{
+      ...w,
+      start_ms: Math.max(0, w.start_ms - trimStartMs),
+      end_ms:   Math.min(trimEndMs - trimStartMs, w.end_ms - trimStartMs),
+    }];
+  });
+}
+
+function adjustTimestampsForMove(
+  ts: WordTimestamp[],
+  cutStartMs: number, cutEndMs: number,
+  adjDestMs:  number,
+): WordTimestamp[] {
+  const regLenMs = cutEndMs - cutStartMs;
+  // Pass 1: close the source gap (same logic as cut), tracking moved words' offset
+  const movedWords:   WordTimestamp[] = [];
+  const afterGap:     WordTimestamp[] = [];
+  for (const w of ts) {
+    if (w.end_ms <= cutStartMs) {
+      afterGap.push(w);
+    } else if (w.start_ms >= cutEndMs) {
+      afterGap.push({ ...w, start_ms: w.start_ms - regLenMs, end_ms: w.end_ms - regLenMs });
+    } else if (w.start_ms >= cutStartMs && w.end_ms <= cutEndMs) {
+      movedWords.push({ ...w, start_ms: w.start_ms - cutStartMs, end_ms: w.end_ms - cutStartMs }); // offset relative to region start
+    } else if (w.start_ms < cutStartMs) {
+      afterGap.push({ ...w, end_ms: cutStartMs });
+    } else {
+      afterGap.push({ ...w, start_ms: cutStartMs, end_ms: w.end_ms - regLenMs });
+    }
+  }
+  // Pass 2: insert moved words at adjDest, shifting everything at/after adjDest right
+  const result: WordTimestamp[] = afterGap.map(w =>
+    w.start_ms >= adjDestMs
+      ? { ...w, start_ms: w.start_ms + regLenMs, end_ms: w.end_ms + regLenMs }
+      : w
+  );
+  for (const w of movedWords) {
+    result.push({ ...w, start_ms: adjDestMs + w.start_ms, end_ms: adjDestMs + w.end_ms });
+  }
+  return result.sort((a, b) => a.start_ms - b.start_ms);
+}
+
+function adjustTimestampsForCopy(
+  ts: WordTimestamp[],
+  cutStartMs: number, cutEndMs: number,
+  destMs:     number,
+): WordTimestamp[] {
+  const copies = ts
+    .filter(w => w.start_ms >= cutStartMs && w.end_ms <= cutEndMs)
+    .map(w => ({
+      ...w,
+      start_ms: destMs + (w.start_ms - cutStartMs),
+      end_ms:   destMs + (w.end_ms   - cutStartMs),
+    }));
+  return [...ts, ...copies].sort((a, b) => a.start_ms - b.start_ms);
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -227,8 +301,8 @@ export default function TimelineEditor({ tracks, onApply, onClose }: Props) {
         }
       }
 
-      // region overlay
-      if (reg && reg.trackId === track.id) {
+      // region overlay — only shown while still selecting (opType not yet committed)
+      if (reg && reg.trackId === track.id && reg.opType === null) {
         const rL = LABEL_W + reg.startSec * zoom - scroll;
         const rR = LABEL_W + reg.endSec   * zoom - scroll;
         const rcL = Math.max(LABEL_W, rL);
@@ -441,26 +515,199 @@ export default function TimelineEditor({ tracks, onApply, onClose }: Props) {
     rafRef.current = requestAnimationFrame(draw);
   };
 
-  // ── Region operations ──────────────────────────────────────────────────────
+  // ── Immediate operation execution ─────────────────────────────────────────
+  const applyRegionOp = async (reg: Region) => {
+    const dec = decoded.get(reg.trackId);
+    if (!dec || !reg.opType) return;
+    setApplying(true);
+    try {
+      const sr   = dec.buffer.sampleRate;
+      const numCh = dec.buffer.numberOfChannels;
+      const off  = offsetsRef.current.get(reg.trackId) ?? 0;
+      const offSamples = Math.floor(off * sr);
+      const fullOutLen = Math.ceil((off + dec.durationSec) * sr);
+
+      const cutStart = Math.floor(reg.startSec * sr);
+      const cutEnd   = Math.min(Math.floor(reg.endSec * sr), fullOutLen);
+      const regLen   = Math.max(0, cutEnd - cutStart);
+
+      // Build working buffer at full length (with offset baked in)
+      const chans = Array.from({ length: numCh }, () => new Float32Array(fullOutLen));
+      for (let ch = 0; ch < numCh; ch++) {
+        const src = dec.buffer.getChannelData(ch);
+        for (let i = 0; i < src.length; i++) {
+          const j = i + offSamples;
+          if (j < fullOutLen) chans[ch][j] = src[i];
+        }
+      }
+
+      // Extract segment before modifying
+      const segment = Array.from({ length: numCh }, (_, ch) => {
+        const s = new Float32Array(regLen);
+        for (let i = 0; i < regLen; i++) s[i] = chans[ch][cutStart + i] ?? 0;
+        return s;
+      });
+
+      // Will be set inside the move block for timestamp computation
+      let adjDestSamples = 0;
+
+      if (reg.opType === 'silence') {
+        for (let ch = 0; ch < numCh; ch++)
+          for (let i = cutStart; i < cutEnd && i < fullOutLen; i++) chans[ch][i] = 0;
+
+      } else if (reg.opType === 'copy' && reg.destSec !== null) {
+        const destStart = Math.floor(reg.destSec * sr);
+        for (let ch = 0; ch < numCh; ch++) {
+          const seg = segment[ch];
+          for (let i = 0; i < regLen; i++) {
+            const j = destStart + i;
+            if (j >= 0 && j < fullOutLen) chans[ch][j] = seg[i];
+          }
+        }
+
+      } else if (reg.opType === 'move' && reg.destSec !== null) {
+        const rawDest = Math.floor(reg.destSec * sr);
+        for (let ch = 0; ch < numCh; ch++) {
+          const dst = chans[ch];
+          const tailLen = fullOutLen - cutEnd;
+          for (let i = 0; i < tailLen; i++) dst[cutStart + i] = dst[cutEnd + i];
+          for (let i = cutStart + tailLen; i < fullOutLen; i++) dst[i] = 0;
+        }
+        const adjDest = rawDest > cutEnd ? rawDest - regLen : rawDest > cutStart ? cutStart : rawDest;
+        adjDestSamples = adjDest; // captured for timestamp computation below
+        const clampedDest = Math.max(0, Math.min(fullOutLen - regLen, adjDest));
+        for (let ch = 0; ch < numCh; ch++) {
+          const dst = chans[ch];
+          for (let i = fullOutLen - regLen - 1; i >= clampedDest; i--)
+            if (i + regLen < fullOutLen) dst[i + regLen] = dst[i];
+          const seg = segment[ch];
+          for (let i = 0; i < regLen; i++) {
+            const j = clampedDest + i;
+            if (j >= 0 && j < fullOutLen) dst[j] = seg[i];
+          }
+        }
+
+      } else if (reg.opType === 'cut') {
+        const cutLen = Math.max(1, fullOutLen - regLen);
+        for (let ch = 0; ch < numCh; ch++) {
+          const cut = new Float32Array(cutLen);
+          cut.set(chans[ch].subarray(0, cutStart));
+          cut.set(chans[ch].subarray(cutEnd, fullOutLen), cutStart);
+          chans[ch] = cut;
+        }
+
+      } else if (reg.opType === 'trim') {
+        for (let ch = 0; ch < numCh; ch++) {
+          const trimmed = new Float32Array(Math.max(1, regLen));
+          for (let i = 0; i < trimmed.length; i++) trimmed[i] = chans[ch][cutStart + i] ?? 0;
+          chans[ch] = trimmed;
+        }
+      }
+
+      const finalLen = chans[0].length;
+      const actx = new AudioContext();
+      const finalBuf = actx.createBuffer(numCh, finalLen, sr);
+      for (let ch = 0; ch < numCh; ch++) finalBuf.getChannelData(ch).set(chans[ch]);
+      await actx.close();
+
+      const url = encodeWav(finalBuf);
+
+      // Recompute peaks for the updated buffer
+      const peaks = new Float32Array(PEAKS);
+      const step  = Math.max(1, finalBuf.length / PEAKS);
+      for (let b = 0; b < PEAKS; b++) {
+        let maxAbs = 0;
+        const s = Math.floor(b * step);
+        const e = Math.min(finalBuf.length, Math.floor((b + 1) * step));
+        for (let ch = 0; ch < numCh; ch++) {
+          const d = finalBuf.getChannelData(ch);
+          for (let i = s; i < e; i++) if (Math.abs(d[i]) > maxAbs) maxAbs = Math.abs(d[i]);
+        }
+        peaks[b] = maxAbs;
+      }
+
+      // ── Compute updated word timestamps ──────────────────────────────────────
+      const srcTrack = tracks.find(t => t.id === reg.trackId);
+      const origTs   = srcTrack?.wordTimestamps;
+      let updatedTimestamps: WordTimestamp[] | undefined;
+      if (origTs && origTs.length > 0) {
+        const offMs = off * 1000;
+        // Shift timestamps to chans-space (accounts for baked-in offset leading silence)
+        const tsInChans: WordTimestamp[] = offMs > 0
+          ? origTs.map(w => ({ ...w, start_ms: w.start_ms + offMs, end_ms: w.end_ms + offMs }))
+          : origTs;
+        const cutStartMs = cutStart / sr * 1000;
+        const cutEndMs   = cutEnd   / sr * 1000;
+        switch (reg.opType) {
+          case 'cut':
+            updatedTimestamps = adjustTimestampsForCut(tsInChans, cutStartMs, cutEndMs);
+            break;
+          case 'trim':
+            updatedTimestamps = adjustTimestampsForTrim(tsInChans, cutStartMs, cutEndMs);
+            break;
+          case 'move': {
+            const adjDestMs = adjDestSamples / sr * 1000;
+            updatedTimestamps = adjustTimestampsForMove(tsInChans, cutStartMs, cutEndMs, adjDestMs);
+            break;
+          }
+          case 'copy': {
+            const destMs = reg.destSec !== null ? Math.floor(reg.destSec * sr) / sr * 1000 : 0;
+            updatedTimestamps = adjustTimestampsForCopy(tsInChans, cutStartMs, cutEndMs, destMs);
+            break;
+          }
+          default: // silence — timestamps stay in chans-space (offset corrected)
+            updatedTimestamps = tsInChans;
+        }
+      }
+
+      // Reset offset (now baked in), clear region, update decoded, notify parent
+      offsetsRef.current.set(reg.trackId, 0);
+      regionRef.current = null;
+      setDecoded(prev => {
+        const next = new Map(prev);
+        next.set(reg.trackId, { id: reg.trackId, peaks, durationSec: finalBuf.duration, buffer: finalBuf });
+        return next;
+      });
+      onApply([{ id: reg.trackId, url, timestamps: updatedTimestamps }]);
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  // ── Region operations — each executes immediately ─────────────────────────
   const silenceRegion = () => {
     if (!regionRef.current) return;
-    regionRef.current = { ...regionRef.current, destSec: regionRef.current.startSec, opType: 'silence' };
-    cancelAnimationFrame(rafRef.current);
-    rafRef.current = requestAnimationFrame(draw);
+    const reg = { ...regionRef.current, destSec: regionRef.current.startSec, opType: 'silence' as const };
+    setHasRegion(false); setRegionHasDest(false);
+    void applyRegionOp(reg);
   };
 
   const commitMove = () => {
     if (!regionRef.current || regionRef.current.destSec === null) return;
-    regionRef.current = { ...regionRef.current, opType: 'move' };
-    cancelAnimationFrame(rafRef.current);
-    rafRef.current = requestAnimationFrame(draw);
+    const reg = { ...regionRef.current, opType: 'move' as const };
+    setHasRegion(false); setRegionHasDest(false);
+    void applyRegionOp(reg);
   };
 
   const commitCopy = () => {
     if (!regionRef.current || regionRef.current.destSec === null) return;
-    regionRef.current = { ...regionRef.current, opType: 'copy' };
-    cancelAnimationFrame(rafRef.current);
-    rafRef.current = requestAnimationFrame(draw);
+    const reg = { ...regionRef.current, opType: 'copy' as const };
+    setHasRegion(false); setRegionHasDest(false);
+    void applyRegionOp(reg);
+  };
+
+  const commitCut = () => {
+    if (!regionRef.current) return;
+    const reg = { ...regionRef.current, opType: 'cut' as const };
+    setHasRegion(false); setRegionHasDest(false);
+    void applyRegionOp(reg);
+  };
+
+  const commitTrim = () => {
+    if (!regionRef.current) return;
+    const reg = { ...regionRef.current, opType: 'trim' as const };
+    setHasRegion(false); setRegionHasDest(false);
+    void applyRegionOp(reg);
   };
 
   const clearRegion = () => {
@@ -471,104 +718,44 @@ export default function TimelineEditor({ tracks, onApply, onClose }: Props) {
     rafRef.current = requestAnimationFrame(draw);
   };
 
-  // ── Apply ──────────────────────────────────────────────────────────────────
-  const handleApply = async () => {
+  // ── Close — bakes any pending track offsets before closing ────────────────
+  const handleClose = async () => {
+    const pending = tracks.filter(t => (offsetsRef.current.get(t.id) ?? 0) !== 0);
+    if (pending.length === 0) { onClose(); return; }
     setApplying(true);
     try {
-      // Find total output length
       let maxEnd = 0;
-      for (const track of tracks) {
-        const dec = decoded.get(track.id);
-        const off = offsetsRef.current.get(track.id) ?? 0;
+      for (const t of tracks) {
+        const dec = decoded.get(t.id);
+        const off = offsetsRef.current.get(t.id) ?? 0;
         if (dec) maxEnd = Math.max(maxEnd, off + dec.durationSec);
       }
-
-      const reg     = regionRef.current;
-      const results: { id: string; url: string }[] = [];
-
+      const results: { id: string; url: string; timestamps?: WordTimestamp[] }[] = [];
       for (const track of tracks) {
         const dec = decoded.get(track.id);
         const off = offsetsRef.current.get(track.id) ?? 0;
-
-        // Unchanged: no offset and no region op on this track
-        const hasOffsetChange = off !== 0;
-        const hasRegionOp     = reg?.trackId === track.id && reg.opType !== null;
-
-        if (!dec || (!hasOffsetChange && !hasRegionOp)) {
-          results.push({ id: track.id, url: track.url });
-          continue;
-        }
-
-        const sr     = dec.buffer.sampleRate;
-        const numCh  = dec.buffer.numberOfChannels;
+        if (!dec || off === 0) { results.push({ id: track.id, url: track.url }); continue; }
+        const sr = dec.buffer.sampleRate, numCh = dec.buffer.numberOfChannels;
         const outLen = Math.ceil(maxEnd * sr);
-        const chans  = Array.from({ length: numCh }, () => new Float32Array(outLen));
-
+        const actx = new AudioContext();
+        const outBuf = actx.createBuffer(numCh, outLen, sr);
         const offSamples = Math.floor(off * sr);
-
-        // Copy source at offset
         for (let ch = 0; ch < numCh; ch++) {
           const src = dec.buffer.getChannelData(ch);
-          const dst = chans[ch];
-          for (let i = 0; i < src.length; i++) {
-            const j = i + offSamples;
-            if (j < outLen) dst[j] = src[i];
-          }
+          const dst = outBuf.getChannelData(ch);
+          for (let i = 0; i < src.length; i++) { const j = i + offSamples; if (j < outLen) dst[j] = src[i]; }
         }
-
-        // Apply region operation
-        if (hasRegionOp && reg) {
-          const cutStart  = Math.floor(reg.startSec * sr);
-          const cutEnd    = Math.floor(reg.endSec   * sr);
-          const regLen    = cutEnd - cutStart;
-
-          // Extract the segment BEFORE modifying channels
-          const segment = Array.from({ length: numCh }, (_, ch) => {
-            const s = new Float32Array(regLen);
-            const src = chans[ch];
-            for (let i = 0; i < regLen; i++) s[i] = src[cutStart + i] ?? 0;
-            return s;
-          });
-
-          if (reg.opType === 'silence') {
-            // Zero out the original region in place
-            for (let ch = 0; ch < numCh; ch++) {
-              const dst = chans[ch];
-              for (let i = cutStart; i < cutEnd && i < outLen; i++) dst[i] = 0;
-            }
-          } else if ((reg.opType === 'move' || reg.opType === 'copy') && reg.destSec !== null) {
-            const destStart = Math.floor(reg.destSec * sr);
-            // move: silence original; copy: leave original
-            if (reg.opType === 'move') {
-              for (let ch = 0; ch < numCh; ch++) {
-                const dst = chans[ch];
-                for (let i = cutStart; i < cutEnd && i < outLen; i++) dst[i] = 0;
-              }
-            }
-            // paste at destination
-            for (let ch = 0; ch < numCh; ch++) {
-              const dst = chans[ch];
-              const seg = segment[ch];
-              for (let i = 0; i < regLen; i++) {
-                const j = destStart + i;
-                if (j >= 0 && j < outLen) dst[j] = seg[i];
-              }
-            }
-          }
-        }
-
-        // Build AudioBuffer from raw Float32Arrays
-        const actx    = new AudioContext();
-        const finalBuf = actx.createBuffer(numCh, outLen, sr);
-        for (let ch = 0; ch < numCh; ch++) finalBuf.getChannelData(ch).set(chans[ch]);
         await actx.close();
-
-        results.push({ id: track.id, url: encodeWav(finalBuf) });
+        const offMs = off * 1000;
+        const shiftedTs = track.wordTimestamps
+          ? track.wordTimestamps.map(w => ({ ...w, start_ms: w.start_ms + offMs, end_ms: w.end_ms + offMs }))
+          : undefined;
+        results.push({ id: track.id, url: encodeWav(outBuf), timestamps: shiftedTs });
       }
-
       onApply(results);
     } finally {
       setApplying(false);
+      onClose();
     }
   };
 
@@ -588,18 +775,30 @@ export default function TimelineEditor({ tracks, onApply, onClose }: Props) {
           <div className="flex items-center gap-2">
             {/* Tool toggle */}
             <div className="flex rounded-md overflow-hidden border border-[#2a2a2a]">
-              {(['move', 'select'] as const).map(t => (
-                <button
-                  key={t}
-                  onClick={() => setTool(t)}
-                  className={`px-3 py-1.5 text-xs font-medium transition-colors capitalize ${
-                    tool === t ? 'bg-[#2a2a2a] text-white' : 'bg-transparent text-neutral-500 hover:text-white'
-                  }`}
-                  title={t === 'move' ? 'Drag a track left/right to offset its start' : 'Click+drag to select a region; drag selected region to move it'}
-                >
-                  {t === 'move' ? 'Move' : 'Select'}
-                </button>
-              ))}
+              <button
+                onClick={() => setTool('move')}
+                className={`px-2.5 py-1.5 transition-colors ${
+                  tool === 'move' ? 'bg-[#2a2a2a] text-white' : 'bg-transparent text-neutral-500 hover:text-white'
+                }`}
+                title="Hand: drag a track left/right to offset its start"
+              >
+                {/* Open hand / pan_tool icon */}
+                <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M23 5.5V20c0 2.2-1.8 4-4 4h-7.3c-1.08 0-2.1-.43-2.85-1.19L1 14.83s1.26-1.23 1.3-1.25c.22-.19.49-.29.79-.29.22 0 .42.06.6.16L7 16V5.5C7 4.12 8.12 3 9.5 3S12 4.12 12 5.5V11h1V3.5C13 2.12 14.12 1 15.5 1S18 2.12 18 3.5V11h1V5.5C19 4.12 20.12 3 21.5 3S24 4.12 23 5.5z"/>
+                </svg>
+              </button>
+              <button
+                onClick={() => setTool('select')}
+                className={`px-2.5 py-1.5 transition-colors border-l border-[#2a2a2a] ${
+                  tool === 'select' ? 'bg-[#2a2a2a] text-white' : 'bg-transparent text-neutral-500 hover:text-white'
+                }`}
+                title="Cursor: click+drag to select a region; drag selected region to move it"
+              >
+                {/* Mouse cursor / arrow icon */}
+                <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M4 2L4 18L7.5 14.5L10 20.5L12.5 19.5L10 13.5L15 13.5Z"/>
+                </svg>
+              </button>
             </div>
 
             {/* Zoom */}
@@ -618,6 +817,20 @@ export default function TimelineEditor({ tracks, onApply, onClose }: Props) {
                   title="Fill selected region with silence (waveform flattens immediately)"
                 >
                   Silence
+                </button>
+                <button
+                  onClick={commitCut}
+                  className="px-3 py-1.5 text-xs bg-orange-950/60 text-orange-400 hover:bg-orange-900/60 border border-orange-900/50 rounded-md font-medium"
+                  title="Cut: remove selected region and close the gap"
+                >
+                  Cut
+                </button>
+                <button
+                  onClick={commitTrim}
+                  className="px-3 py-1.5 text-xs bg-violet-950/60 text-violet-400 hover:bg-violet-900/60 border border-violet-900/50 rounded-md font-medium"
+                  title="Trim: keep only the selected region"
+                >
+                  Trim
                 </button>
                 {regionHasDest && (
                   <>
@@ -647,17 +860,11 @@ export default function TimelineEditor({ tracks, onApply, onClose }: Props) {
             )}
 
             <button
-              onClick={handleApply}
+              onClick={handleClose}
               disabled={applying}
-              className="px-4 py-1.5 text-xs bg-[#f37321] hover:bg-[#e06010] disabled:opacity-50 text-white rounded-md font-semibold"
-            >
-              {applying ? 'Applying…' : 'Apply'}
-            </button>
-            <button
-              onClick={onClose}
               className="px-3 py-1.5 text-xs bg-[#1e1e1e] hover:bg-[#2a2a2a] text-neutral-400 hover:text-white rounded-md font-medium"
             >
-              Cancel
+              {applying ? 'Applying…' : 'Close'}
             </button>
           </div>
         </div>

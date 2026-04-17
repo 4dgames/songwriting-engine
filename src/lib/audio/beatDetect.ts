@@ -8,6 +8,79 @@
  */
 
 /**
+ * Trims a newly-generated section clip so it starts at beat 1.
+ *
+ * The model often outputs a short pickup (silence or a pickup note) before
+ * the downbeat. We detect beat phase in the new clip independently, then
+ * remove exactly that many samples so the clip's first sample aligns with
+ * beat 1. The trimmed ms is returned so callers can shift word timestamps.
+ *
+ * Limits:
+ *  - Won't trim less than 20 ms (already aligned)
+ *  - Won't trim more than one beat period (something's wrong if we'd need more)
+ */
+export async function trimToDownbeat(
+  audioUrl: string,
+  tempo: number,
+): Promise<{ url: string; trimmedMs: number }> {
+  const arrayBuf = await fetch(audioUrl).then(r => r.arrayBuffer());
+  const ctx = new AudioContext();
+  const audioBuf = await ctx.decodeAudioData(arrayBuf);
+  await ctx.close();
+
+  const beatPeriodMs = 60000 / tempo;
+  const beatPhaseMs  = detectBeatPhaseMs(audioBuf, tempo);
+
+  // Skip trimming if the offset is negligible or suspiciously large
+  if (beatPhaseMs < 20 || beatPhaseMs > beatPeriodMs * 0.9) {
+    return { url: audioUrl, trimmedMs: 0 };
+  }
+
+  const { sampleRate, numberOfChannels, length } = audioBuf;
+  const trimSamples = Math.round((beatPhaseMs / 1000) * sampleRate);
+  const newLength   = length - trimSamples;
+  if (newLength <= 0) return { url: audioUrl, trimmedMs: 0 };
+
+  const offline = new OfflineAudioContext(numberOfChannels, newLength, sampleRate);
+  const source  = offline.createBufferSource();
+  source.buffer = audioBuf;
+  source.connect(offline.destination);
+  source.start(0, beatPhaseMs / 1000);
+
+  const rendered = await offline.startRendering();
+  return { url: URL.createObjectURL(encodeWavBlob(rendered)), trimmedMs: beatPhaseMs };
+}
+
+function encodeWavBlob(buffer: AudioBuffer): Blob {
+  const { numberOfChannels, sampleRate, length } = buffer;
+  const bytesPerSample = 2;
+  const blockAlign     = numberOfChannels * bytesPerSample;
+  const dataSize       = length * blockAlign;
+  const wav  = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(wav);
+  const str  = (off: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
+  };
+  str(0, 'RIFF'); view.setUint32(4, 36 + dataSize, true);
+  str(8, 'WAVE'); str(12, 'fmt ');
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+  view.setUint16(22, numberOfChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * blockAlign, true);
+  view.setUint16(32, blockAlign, true); view.setUint16(34, bytesPerSample * 8, true);
+  str(36, 'data'); view.setUint32(40, dataSize, true);
+  let off = 44;
+  for (let i = 0; i < length; i++) {
+    for (let ch = 0; ch < numberOfChannels; ch++) {
+      const s = Math.max(-1, Math.min(1, buffer.getChannelData(ch)[i]));
+      view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      off += 2;
+    }
+  }
+  return new Blob([wav], { type: 'audio/wav' });
+}
+
+/**
  * Returns the time in milliseconds of the first beat-1 in the audio.
  * Uses onset-strength template matching: slides a pulse train at the
  * known tempo across the onset-strength signal and finds the phase that

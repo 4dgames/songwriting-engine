@@ -56,10 +56,10 @@ interface Props {
   playSectionRequest?: { index: number; seq: number }; // seek + play a specific section
   vocalsRecordingStream?: MediaStream | null; // live mic stream while recording vocals
   extraVocalTracks?: { id: string; url: string; label: string }[];
-  onDeleteVocalsTrack?: (id: string) => void; // delete a extra recorded vocal track
+  onDeleteVocalsTrack?: (id: string) => void; // delete a recorded vocal take
   onDeletePrimaryVocals?: () => void;          // delete the primary AI/split vocals track
-  /** Called after an inline edit is applied; trackId is 'instrumental', 'vocals', or extraVocalTrack id */
-  onTrackEdited?: (trackId: string, newUrl: string) => void;
+  activeExtraVocalId?: string | null;
+  onSelectExtraVocal?: (id: string) => void;
 }
 
 export default function AudioPlayer({
@@ -76,7 +76,8 @@ export default function AudioPlayer({
   extraVocalTracks,
   onDeleteVocalsTrack,
   onDeletePrimaryVocals,
-  onTrackEdited,
+  activeExtraVocalId,
+  onSelectExtraVocal,
 }: Props) {
   const audioRef  = useRef<HTMLAudioElement>(null);
   const vocalsRef = useRef<HTMLAudioElement>(null);
@@ -111,15 +112,6 @@ export default function AudioPlayer({
 
   const [waveformZoom,  setWaveformZoom]  = useState(1);
   const waveformScrollRef = useRef<HTMLDivElement>(null);
-
-  // ── Inline waveform editing ───────────────────────────────────────────────
-  const [inlineEdit, setInlineEdit] = useState<{
-    trackId:  string;
-    trackUrl: string;
-    region:   { startRatio: number; endRatio: number } | null;
-    destRatio: number | null;
-    applying: boolean;
-  } | null>(null);
 
   const [currentInstrumentalUrl, setCurrentInstrumentalUrl] = useState(audioUrl);
   const [currentVocalsUrl,       setCurrentVocalsUrl]       = useState(vocalsUrl ?? '');
@@ -472,8 +464,12 @@ export default function AudioPlayer({
 
   // ── Playback controls ─────────────────────────────────────────────────────────
 
-  /** All extra vocal track audio elements (live snapshot). */
-  const extraVocalEls = () => Array.from(extraVocalAudioRefsMap.current.values());
+  /** Only the active recorded vocal take's audio element. */
+  const extraVocalEls = () => {
+    if (!activeExtraVocalId) return [];
+    const el = extraVocalAudioRefsMap.current.get(activeExtraVocalId);
+    return el ? [el] : [];
+  };
 
   /** Master play/pause — all tracks (instrumental, vocals, stems, extra vocals) start simultaneously. */
   const toggle = useCallback(async () => {
@@ -635,81 +631,6 @@ export default function AudioPlayer({
     }
   };
 
-  // ── Inline edit apply ──────────────────────────────────────────────────────
-  const applyInlineEdit = async (opType: 'silence' | 'move' | 'copy') => {
-    if (!inlineEdit?.region) return;
-    setInlineEdit(e => e ? { ...e, applying: true } : null);
-    try {
-      const { trackId, trackUrl, region, destRatio } = inlineEdit;
-      const audioCtx = new AudioContext();
-      const buf = await audioCtx.decodeAudioData(await fetch(trackUrl).then(r => r.arrayBuffer()));
-      await audioCtx.close();
-
-      const sr = buf.sampleRate, numCh = buf.numberOfChannels, totalLen = buf.length;
-      const S = Math.floor(region.startRatio * totalLen);
-      const E = Math.floor(region.endRatio   * totalLen);
-      const regLen = Math.max(0, E - S);
-
-      // Extract the segment
-      const seg = Array.from({ length: numCh }, (_, ch) => {
-        const s = new Float32Array(regLen);
-        const src = buf.getChannelData(ch);
-        for (let i = 0; i < regLen; i++) s[i] = src[S + i];
-        return s;
-      });
-
-      let newUrl: string;
-
-      if (opType === 'silence') {
-        const actx = new AudioContext();
-        const out = actx.createBuffer(numCh, totalLen, sr);
-        for (let ch = 0; ch < numCh; ch++) {
-          const dst = out.getChannelData(ch); dst.set(buf.getChannelData(ch));
-          for (let i = S; i < E; i++) dst[i] = 0;
-        }
-        await actx.close();
-        newUrl = encodeWav(out);
-
-      } else if (opType === 'move') {
-        // Splice out [S,E] → close gap → insert at adjusted dest
-        const spliced = Array.from({ length: numCh }, (_, ch) => {
-          const src = buf.getChannelData(ch);
-          const o = new Float32Array(totalLen - regLen);
-          o.set(src.subarray(0, S)); o.set(src.subarray(E), S);
-          return o;
-        });
-        const rawDest = Math.floor((destRatio ?? 0) * totalLen);
-        const D = rawDest > E ? Math.max(0, rawDest - regLen) : Math.max(0, Math.min(S, rawDest));
-        const actx = new AudioContext();
-        const out = actx.createBuffer(numCh, totalLen, sr); // same length — splice out + insert back
-        for (let ch = 0; ch < numCh; ch++) {
-          const s = spliced[ch]; const d = out.getChannelData(ch);
-          d.set(s.subarray(0, D)); d.set(seg[ch], D); d.set(s.subarray(D), D + regLen);
-        }
-        await actx.close();
-        newUrl = encodeWav(out);
-
-      } else { // copy — keeps original, pastes a duplicate
-        const D = Math.floor((destRatio ?? region.endRatio) * totalLen);
-        const finalLen = totalLen + regLen;
-        const actx = new AudioContext();
-        const out = actx.createBuffer(numCh, finalLen, sr);
-        for (let ch = 0; ch < numCh; ch++) {
-          const src = buf.getChannelData(ch); const d = out.getChannelData(ch);
-          d.set(src.subarray(0, D)); d.set(seg[ch], D); d.set(src.subarray(D), D + regLen);
-        }
-        await actx.close();
-        newUrl = encodeWav(out);
-      }
-
-      onTrackEdited?.(trackId, newUrl);
-      setInlineEdit(null);
-    } catch (err) {
-      console.error('Inline edit failed', err);
-      setInlineEdit(e => e ? { ...e, applying: false } : null);
-    }
-  };
-
   // ── Render ────────────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col gap-6">
@@ -773,141 +694,127 @@ export default function AudioPlayer({
             >+</button>
           </div>
 
-          {/* Layout toggle */}
-          {hasTwoTracks ? (
-            <>
-              <a href={currentInstrumentalUrl} download={`${title}-instrumental.mp3`}
-                className="text-xs text-[#929292] hover:text-[#f37321] transition-colors">
-                ↓ Instrumental
-              </a>
-              <a href={currentVocalsUrl} download={`${title}-vocals.mp3`}
-                className="text-xs text-[#929292] hover:text-[#f37321] transition-colors">
-                ↓ Vocals
-              </a>
-            </>
-          ) : (
-            <a href={currentInstrumentalUrl} download={`${title}.mp3`}
-              className="text-xs text-[#929292] hover:text-[#f37321] transition-colors">
-              Download
-            </a>
-          )}
         </div>
 
         {/* ── All tracks in a single scrollable column ── */}
         {true && (<>
             <div ref={waveformScrollRef} style={{ overflowX: waveformZoom > 1 ? 'auto' : 'visible', scrollbarWidth: 'none' }}>
               <div style={{ width: waveformZoom !== 1 ? `${waveformZoom * 100}%` : '100%', minWidth: '100%' }}>
-                {hasTwoTracks ? (
-                  <div className="flex flex-col gap-1">
-                    {/* Section labels above vocal/instrumental tracks */}
-                    {sectionMarkers.length > 0 && (
-                      <div className="flex items-end gap-3">
-                        <div className="flex-shrink-0 flex items-center gap-1.5">
-                          <div className="w-6" />
-                          <div style={{ width: 30 }} />
+                {(() => {
+                  const hasRecordedTakes = (extraVocalTracks?.length ?? 0) > 0;
+                  const useMultiTrack    = hasTwoTracks || hasRecordedTakes;
+
+                  if (useMultiTrack) return (
+                    <div className="flex flex-col gap-1">
+                      {/* Section labels */}
+                      {sectionMarkers.length > 0 && (
+                        <div className="flex items-end gap-3">
+                          <div className="flex-shrink-0 flex items-center gap-1.5">
+                            <div className="w-6" />
+                            <div style={{ width: 30 }} />
+                          </div>
+                          <div className="w-7 flex-shrink-0" />
+                          <div className="w-20 flex-shrink-0" />
+                          <div className="flex-1 min-w-0 relative h-4">
+                            {sectionMarkers.map((marker, i) => (
+                              <button
+                                key={i}
+                                onClick={() => { seek(marker.ratio); handleSectionClick(i); }}
+                                style={{ left: `${marker.ratio * 100}%` }}
+                                className={`absolute text-[10px] font-bold uppercase tracking-wide transition-colors whitespace-nowrap ${
+                                  i === 0 ? 'translate-x-0' : '-translate-x-1/2'
+                                } ${
+                                  activeSectionIndex === i ? 'text-[#da6520]' : 'text-[#f37321] hover:text-[#da6520]'
+                                }`}
+                              >
+                                {marker.label}
+                              </button>
+                            ))}
+                          </div>
                         </div>
-                        <div className="w-7 flex-shrink-0" />
-                        <div className="w-20 flex-shrink-0" />
-                        <div className="flex-1 min-w-0 relative h-4">
-                          {sectionMarkers.map((marker, i) => (
-                            <button
-                              key={i}
-                              onClick={() => { seek(marker.ratio); handleSectionClick(i); }}
-                              style={{ left: `${marker.ratio * 100}%` }}
-                              className={`absolute text-[10px] font-bold uppercase tracking-wide transition-colors whitespace-nowrap ${
-                                i === 0 ? 'translate-x-0' : '-translate-x-1/2'
-                              } ${
-                                activeSectionIndex === i ? 'text-[#da6520]' : 'text-[#f37321] hover:text-[#da6520]'
-                              }`}
-                            >
-                              {marker.label}
-                            </button>
+                      )}
+
+                      {/* Recorded vocal takes — at the top */}
+                      {hasRecordedTakes && (
+                        <div className="flex flex-col gap-0.5">
+                          {/* Takes selector (shown when more than one take) */}
+                          {extraVocalTracks!.length > 1 && (
+                            <div className="flex items-center gap-1.5 pl-[104px]">
+                              <span className="text-[10px] text-[#929292] font-semibold flex-shrink-0">Takes:</span>
+                              {extraVocalTracks!.map(t => (
+                                <button
+                                  key={t.id}
+                                  onClick={() => onSelectExtraVocal?.(t.id)}
+                                  className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors ${
+                                    t.id === activeExtraVocalId
+                                      ? 'bg-[#f37321] text-white'
+                                      : 'bg-white border border-[#bdbdbd] text-[#676767] hover:border-[#f37321] hover:text-[#f37321]'
+                                  }`}
+                                >
+                                  {t.label}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                          {/* Active take waveform */}
+                          {extraVocalTracks!.filter(t => t.id === activeExtraVocalId).map(track => (
+                            <StemTrackRow
+                              key={track.id}
+                              label={extraVocalTracks!.length > 1 ? 'Vocals' : track.label}
+                              audioUrl={track.url}
+                              masterPlaying={playing}
+                              onAudioRef={el => {
+                                if (el) extraVocalAudioRefsMap.current.set(track.id, el);
+                                else extraVocalAudioRefsMap.current.delete(track.id);
+                              }}
+                              onDelete={() => onDeleteVocalsTrack?.(track.id)}
+                            />
                           ))}
                         </div>
-                      </div>
-                    )}
-
-                    {/* Primary vocals */}
-                    <TrackRow
-                      label="Vocals"
-                      playing={vocIsPlaying}
-                      volume={vocalsVolume}
-                      onToggle={toggleVocals}
-                      onVolumeChange={setVocalsVolume}
-                      onRegenerate={onRegenerateVocals}
-                      regenerating={regeneratingVocals}
-                      onDelete={onDeletePrimaryVocals}
-                    >
-                      {vocalsRecordingStream ? (
-                        <LiveRecordingWaveform stream={vocalsRecordingStream} progress={progress} />
-                      ) : (
-                        <EditableWaveformWrapper
-                          trackId="vocals"
-                          trackUrl={currentVocalsUrl}
-                          inlineEdit={inlineEdit}
-                          onStartEdit={() => setInlineEdit({ trackId: 'vocals', trackUrl: currentVocalsUrl, region: null, destRatio: null, applying: false })}
-                          onUpdate={setInlineEdit}
-                          onApply={applyInlineEdit}
-                          onCancel={() => setInlineEdit(null)}
-                        >
-                          <Waveform
-                            audioUrl={currentVocalsUrl}
-                            progress={vocIsPlaying ? progress : 0}
-                            onSeek={seek}
-                            showLabels={false}
-                            sectionMarkers={sectionMarkers}
-                            activeSectionIndex={activeSectionIndex}
-                            onSectionClick={handleSectionClick}
-                          />
-                        </EditableWaveformWrapper>
                       )}
-                    </TrackRow>
 
-                    {/* Extra recorded vocal layers */}
-                    {extraVocalTracks?.map((track, i) => (
-                      <StemTrackRow
-                        key={track.id}
-                        label={track.label || `Vocals ${i + 2}`}
-                        audioUrl={track.url}
-                        masterPlaying={playing}
-                        onAudioRef={el => {
-                          if (el) extraVocalAudioRefsMap.current.set(track.id, el);
-                          else extraVocalAudioRefsMap.current.delete(track.id);
-                        }}
-                        onDelete={() => onDeleteVocalsTrack?.(track.id)}
-                        editOverlay={
-                          <EditableWaveformWrapper
-                            trackId={track.id}
-                            trackUrl={track.url}
-                            inlineEdit={inlineEdit}
-                            onStartEdit={() => setInlineEdit({ trackId: track.id, trackUrl: track.url, region: null, destRatio: null, applying: false })}
-                            onUpdate={setInlineEdit}
-                            onApply={applyInlineEdit}
-                            onCancel={() => setInlineEdit(null)}
-                          />
-                        }
-                      />
-                    ))}
+                      {/* Primary AI vocals */}
+                      {hasTwoTracks && (
+                        <TrackRow
+                          label="Vocals"
+                          playing={vocIsPlaying}
+                          volume={vocalsVolume}
+                          onToggle={toggleVocals}
+                          onVolumeChange={setVocalsVolume}
+                          onRegenerate={onRegenerateVocals}
+                          regenerating={regeneratingVocals}
+                          onDelete={onDeletePrimaryVocals}
+                          downloadUrl={currentVocalsUrl}
+                          downloadFilename={`${title}-vocals.wav`}
+                        >
+                          {vocalsRecordingStream ? (
+                            <LiveRecordingWaveform stream={vocalsRecordingStream} progress={progress} />
+                          ) : (
+                            <Waveform
+                              audioUrl={currentVocalsUrl}
+                              progress={vocIsPlaying ? progress : 0}
+                              onSeek={seek}
+                              showLabels={false}
+                              sectionMarkers={sectionMarkers}
+                              activeSectionIndex={activeSectionIndex}
+                              onSectionClick={handleSectionClick}
+                            />
+                          )}
+                        </TrackRow>
+                      )}
 
-                    {/* Instrumental — hidden once stems have been separated */}
-                    {!instrumentStems && (
-                      <TrackRow
-                        label="Instrumental"
-                        playing={instIsPlaying}
-                        volume={instVolume}
-                        onToggle={toggleInst}
-                        onVolumeChange={setInstVolume}
-                        onRegenerate={onRegenerateInstrumental}
-                        regenerating={regeneratingInstrumental}
-                      >
-                        <EditableWaveformWrapper
-                          trackId="instrumental"
-                          trackUrl={currentInstrumentalUrl}
-                          inlineEdit={inlineEdit}
-                          onStartEdit={() => setInlineEdit({ trackId: 'instrumental', trackUrl: currentInstrumentalUrl, region: null, destRatio: null, applying: false })}
-                          onUpdate={setInlineEdit}
-                          onApply={applyInlineEdit}
-                          onCancel={() => setInlineEdit(null)}
+                      {/* Instrumental — hidden once stems have been separated */}
+                      {!instrumentStems && (
+                        <TrackRow
+                          label="Instrumental"
+                          playing={instIsPlaying}
+                          volume={instVolume}
+                          onToggle={toggleInst}
+                          onVolumeChange={setInstVolume}
+                          onRegenerate={onRegenerateInstrumental}
+                          regenerating={regeneratingInstrumental}
+                          downloadUrl={currentInstrumentalUrl}
+                          downloadFilename={`${title}-instrumental.wav`}
                         >
                           <Waveform
                             audioUrl={currentInstrumentalUrl}
@@ -921,49 +828,65 @@ export default function AudioPlayer({
                             onBeatPhaseReady={handleBeatPhaseReady}
                             tempo={tempo}
                           />
-                        </EditableWaveformWrapper>
-                      </TrackRow>
-                    )}
+                        </TrackRow>
+                      )}
 
-                    {/* Stem rows — inline with the track column */}
-                    {instrumentStems && (
-                      <>
-                        <StemTrackRow label={stemLabels?.drums ?? 'Drums'} audioUrl={instrumentStems.drums} volume={drumVolume}  onVolumeChange={setDrumVolume}  onAudioRef={el => { drumAudioRef.current  = el; }} masterPlaying={playing} />
-                        <StemTrackRow label={stemLabels?.bass  ?? 'Bass'}  audioUrl={instrumentStems.bass}  volume={bassVolume}  onVolumeChange={setBassVolume}  onAudioRef={el => { bassAudioRef.current  = el; }} masterPlaying={playing} />
-                        <StemTrackRow label={stemLabels?.other ?? 'Other'} audioUrl={instrumentStems.other} volume={otherVolume} onVolumeChange={setOtherVolume} onAudioRef={el => { otherAudioRef.current = el; }} masterPlaying={playing} />
-                        {/* Sub-stems from re-separating the Other track via ElevenLabs */}
-                        {otherStemSplit ? (
-                          <div className="ml-5 border-l-2 border-[#e9e9e9] pl-3 flex flex-col gap-0">
-                            <StemTrackRow label="Vocals"      audioUrl={otherStemSplit.vocals}       volume={other2VocalsVol} onVolumeChange={setOther2VocalsVol} onAudioRef={el => { other2VocalsRef.current = el; }} masterPlaying={playing} />
-                            <StemTrackRow label="Instruments" audioUrl={otherStemSplit.instrumental} volume={other2InstVol}   onVolumeChange={setOther2InstVol}   onAudioRef={el => { other2InstRef.current   = el; }} masterPlaying={playing} />
-                          </div>
-                        ) : onSeparateOtherStem && (
-                          <div className="flex justify-end pr-1">
-                            <button
-                              onClick={onSeparateOtherStem}
-                              disabled={separatingOtherStem}
-                              className="text-[10px] font-semibold text-[#929292] hover:text-[#f37321] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                            >
-                              {separatingOtherStem ? 'Separating…' : 'Extract vocals from Other ↻'}
-                            </button>
-                          </div>
-                        )}
-                      </>
-                    )}
-                  </div>
-                ) : (
-                  <Waveform
-                    audioUrl={currentInstrumentalUrl}
-                    progress={progress}
-                    onSeek={seek}
-                    sectionMarkers={sectionMarkers}
-                    activeSectionIndex={activeSectionIndex}
-                    onSectionClick={handleSectionClick}
-                    onDurationReady={handleDurationReady}
-                    onBeatPhaseReady={handleBeatPhaseReady}
-                    tempo={tempo}
-                  />
-                )}
+                      {/* Stem rows */}
+                      {instrumentStems && (
+                        <>
+                          <StemTrackRow label={stemLabels?.drums ?? 'Drums'} audioUrl={instrumentStems.drums} volume={drumVolume}  onVolumeChange={setDrumVolume}  onAudioRef={el => { drumAudioRef.current  = el; }} masterPlaying={playing} />
+                          <StemTrackRow label={stemLabels?.bass  ?? 'Bass'}  audioUrl={instrumentStems.bass}  volume={bassVolume}  onVolumeChange={setBassVolume}  onAudioRef={el => { bassAudioRef.current  = el; }} masterPlaying={playing} />
+                          <StemTrackRow label={stemLabels?.other ?? 'Other'} audioUrl={instrumentStems.other} volume={otherVolume} onVolumeChange={setOtherVolume} onAudioRef={el => { otherAudioRef.current = el; }} masterPlaying={playing} />
+                          {otherStemSplit ? (
+                            <div className="ml-5 border-l-2 border-[#e9e9e9] pl-3 flex flex-col gap-0">
+                              <StemTrackRow label="Vocals"      audioUrl={otherStemSplit.vocals}       volume={other2VocalsVol} onVolumeChange={setOther2VocalsVol} onAudioRef={el => { other2VocalsRef.current = el; }} masterPlaying={playing} />
+                              <StemTrackRow label="Instruments" audioUrl={otherStemSplit.instrumental} volume={other2InstVol}   onVolumeChange={setOther2InstVol}   onAudioRef={el => { other2InstRef.current   = el; }} masterPlaying={playing} />
+                            </div>
+                          ) : onSeparateOtherStem && (
+                            <div className="flex justify-end pr-1">
+                              <button
+                                onClick={onSeparateOtherStem}
+                                disabled={separatingOtherStem}
+                                className="text-[10px] font-semibold text-[#929292] hover:text-[#f37321] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                              >
+                                {separatingOtherStem ? 'Separating…' : 'Extract vocals from Other ↻'}
+                              </button>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  );
+
+                  // Single-track (no vocals, no recorded takes)
+                  return (
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 min-w-0">
+                        <Waveform
+                          audioUrl={currentInstrumentalUrl}
+                          progress={progress}
+                          onSeek={seek}
+                          sectionMarkers={sectionMarkers}
+                          activeSectionIndex={activeSectionIndex}
+                          onSectionClick={handleSectionClick}
+                          onDurationReady={handleDurationReady}
+                          onBeatPhaseReady={handleBeatPhaseReady}
+                          tempo={tempo}
+                        />
+                      </div>
+                      <a
+                        href={currentInstrumentalUrl}
+                        download={`${title}.wav`}
+                        title="Download"
+                        className="w-6 h-6 flex items-center justify-center rounded text-[#bdbdbd] hover:text-[#f37321] transition-colors flex-shrink-0"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                        </svg>
+                      </a>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
 
@@ -1142,10 +1065,12 @@ interface TrackRowProps {
   onRegenerate?: () => void;
   regenerating?: boolean;
   onDelete?: () => void;
+  downloadUrl?: string;
+  downloadFilename?: string;
   children: React.ReactNode; // waveform
 }
 
-function TrackRow({ label, playing, volume, onToggle, onVolumeChange, onRegenerate, regenerating, onDelete, children }: TrackRowProps) {
+function TrackRow({ label, playing, volume, onToggle, onVolumeChange, onRegenerate, regenerating, onDelete, downloadUrl, downloadFilename, children }: TrackRowProps) {
   return (
     <div className="flex items-center gap-3">
       {/* Volume */}
@@ -1181,25 +1106,39 @@ function TrackRow({ label, playing, volume, onToggle, onVolumeChange, onRegenera
       {/* Waveform — fills remaining space */}
       <div className="flex-1 min-w-0">{children}</div>
 
-      {/* Regenerate */}
+      {/* Regenerate — icon only */}
       {onRegenerate && (
         <button
           onClick={onRegenerate}
           disabled={regenerating}
           title={`Regenerate ${label}`}
-          className="flex items-center gap-1 px-2 py-1 rounded text-[10px] font-semibold border border-[#e9e9e9] bg-[#f6f6f6] hover:border-[#f37321] hover:text-[#f37321] text-[#929292] disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex-shrink-0"
+          className="w-6 h-6 flex items-center justify-center rounded text-[#bdbdbd] hover:text-[#f37321] hover:bg-[#fff3eb] disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex-shrink-0"
         >
           {regenerating ? (
             <span className="inline-block w-3 h-3 rounded-full border-2 border-[#bdbdbd] border-t-[#f37321] animate-spin" />
           ) : (
-            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
           )}
-          Regen
         </button>
       )}
-      {/* Delete */}
+
+      {/* Download */}
+      {downloadUrl && (
+        <a
+          href={downloadUrl}
+          download={downloadFilename}
+          title={`Download ${label}`}
+          className="w-6 h-6 flex items-center justify-center rounded text-[#bdbdbd] hover:text-[#f37321] transition-colors flex-shrink-0"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+          </svg>
+        </a>
+      )}
+
+      {/* Delete — rightmost */}
       {onDelete && (
         <button
           onClick={onDelete}
@@ -1215,198 +1154,3 @@ function TrackRow({ label, playing, volume, onToggle, onVolumeChange, onRegenera
   );
 }
 
-// ── Inline waveform editing ────────────────────────────────────────────────────
-
-interface InlineEditState {
-  trackId:  string;
-  trackUrl: string;
-  region:   { startRatio: number; endRatio: number } | null;
-  destRatio: number | null;
-  applying: boolean;
-}
-
-/** Transparent overlay that handles region rubber-band selection and drag. */
-function WaveformEditOverlay({
-  region, destRatio, applying,
-  onRegionChange, onDestChange, onApply, onCancel,
-}: {
-  region:    { startRatio: number; endRatio: number } | null;
-  destRatio: number | null;
-  applying:  boolean;
-  onRegionChange: (r: { startRatio: number; endRatio: number } | null) => void;
-  onDestChange:   (d: number | null) => void;
-  onApply:        (op: 'silence' | 'move' | 'copy') => void;
-  onCancel:       () => void;
-}) {
-  const ref  = useRef<HTMLDivElement>(null);
-  const drag = useRef<{ type: 'draw' | 'drag'; start: number; delta?: number } | null>(null);
-
-  const getRatio = (e: React.MouseEvent) => {
-    const rect = ref.current!.getBoundingClientRect();
-    return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-  };
-
-  const onMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    const r = getRatio(e);
-    if (region && r >= region.startRatio && r <= region.endRatio) {
-      drag.current = { type: 'drag', start: r, delta: r - region.startRatio };
-    } else {
-      drag.current = { type: 'draw', start: r };
-      onRegionChange({ startRatio: r, endRatio: r });
-      onDestChange(null);
-    }
-  };
-
-  const onMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!drag.current) return;
-    const r = getRatio(e);
-    if (drag.current.type === 'draw') {
-      const s = drag.current.start;
-      onRegionChange({ startRatio: Math.min(s, r), endRatio: Math.max(s, r) });
-    } else if (drag.current.type === 'drag' && region) {
-      const w = region.endRatio - region.startRatio;
-      const newStart = Math.max(0, Math.min(1 - w, r - (drag.current.delta ?? 0)));
-      onDestChange(newStart);
-    }
-  };
-
-  const onMouseUp = () => { drag.current = null; };
-
-  const hasRegion = region && (region.endRatio - region.startRatio) > 0.005;
-  const regW      = region ? (region.endRatio - region.startRatio) * 100 : 0;
-  const hasDest   = destRatio !== null && hasRegion &&
-                    Math.abs(destRatio - (region?.startRatio ?? 0)) > 0.005;
-
-  return (
-    <div
-      ref={ref}
-      className="absolute inset-0 z-10"
-      style={{ cursor: drag.current?.type === 'drag' ? 'grabbing' : 'crosshair' }}
-      onMouseDown={onMouseDown}
-      onMouseMove={onMouseMove}
-      onMouseUp={onMouseUp}
-      onMouseLeave={onMouseUp}
-    >
-      {/* Region selection */}
-      {hasRegion && (
-        <div
-          className="absolute top-0 bottom-0 pointer-events-none"
-          style={{
-            left: `${region!.startRatio * 100}%`,
-            width: `${regW}%`,
-            background: 'rgba(96,165,250,0.2)',
-            borderLeft:  '2px solid rgba(96,165,250,0.7)',
-            borderRight: '2px solid rgba(96,165,250,0.7)',
-            cursor: 'grab',
-          }}
-        />
-      )}
-
-      {/* Destination ghost */}
-      {hasDest && (
-        <div
-          className="absolute top-0 bottom-0 pointer-events-none"
-          style={{
-            left:  `${destRatio! * 100}%`,
-            width: `${regW}%`,
-            background: 'rgba(96,165,250,0.08)',
-            borderLeft:  '2px dashed rgba(96,165,250,0.5)',
-            borderRight: '2px dashed rgba(96,165,250,0.5)',
-          }}
-        />
-      )}
-
-      {/* Action buttons — float at top-right of overlay */}
-      {hasRegion && (
-        <div
-          className="absolute top-1 right-1 flex items-center gap-1"
-          onMouseDown={e => e.stopPropagation()}
-        >
-          {!applying ? (
-            <>
-              <button
-                onClick={() => onApply('silence')}
-                className="px-2 py-0.5 text-[10px] font-bold rounded bg-red-500/80 text-white hover:bg-red-500 shadow"
-                title="Fill selected region with silence"
-              >Silence</button>
-              {hasDest && (
-                <>
-                  <button
-                    onClick={() => onApply('move')}
-                    className="px-2 py-0.5 text-[10px] font-bold rounded bg-blue-500/80 text-white hover:bg-blue-500 shadow"
-                    title="Splice out region and insert at ghost position (closes gap)"
-                  >Move</button>
-                  <button
-                    onClick={() => onApply('copy')}
-                    className="px-2 py-0.5 text-[10px] font-bold rounded bg-green-500/80 text-white hover:bg-green-500 shadow"
-                    title="Keep original and paste a copy at ghost position"
-                  >Copy</button>
-                </>
-              )}
-              <button
-                onClick={onCancel}
-                className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-black/30 text-white hover:bg-black/50 shadow"
-                title="Cancel"
-              >✕</button>
-            </>
-          ) : (
-            <span className="px-2 py-0.5 text-[10px] text-white/80 bg-black/40 rounded">Applying…</span>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Wraps a waveform with a hover-revealed edit button + inline editing overlay. */
-function EditableWaveformWrapper({
-  trackId, trackUrl, inlineEdit, onStartEdit, onUpdate, onApply, onCancel, children,
-}: {
-  trackId:     string;
-  trackUrl:    string;
-  inlineEdit:  InlineEditState | null;
-  onStartEdit: () => void;
-  onUpdate:    (s: InlineEditState | null) => void;
-  onApply:     (op: 'silence' | 'move' | 'copy') => void;
-  onCancel:    () => void;
-  children?:   React.ReactNode;
-}) {
-  const isEditing = inlineEdit?.trackId === trackId;
-  return (
-    <div className="relative w-full group/ew">
-      {children}
-
-      {/* Scissors button — appears on hover when not editing */}
-      {!isEditing && (
-        <button
-          onClick={onStartEdit}
-          className="absolute top-1 right-1 opacity-0 group-hover/ew:opacity-100 transition-opacity z-20 p-1 rounded bg-black/25 text-white hover:bg-[#f37321]/80"
-          title="Edit this track: select a region to silence, move, or copy"
-          onMouseDown={e => e.stopPropagation()}
-        >
-          {/* Scissors icon */}
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-            <circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>
-            <line x1="20" y1="4" x2="8.12" y2="15.88"/>
-            <line x1="14.47" y1="14.48" x2="20" y2="20"/>
-            <line x1="8.12" y1="8.12" x2="12" y2="12"/>
-          </svg>
-        </button>
-      )}
-
-      {/* Edit overlay */}
-      {isEditing && (
-        <WaveformEditOverlay
-          region={inlineEdit!.region}
-          destRatio={inlineEdit!.destRatio}
-          applying={inlineEdit!.applying}
-          onRegionChange={region => onUpdate({ ...inlineEdit!, region })}
-          onDestChange={destRatio => onUpdate({ ...inlineEdit!, destRatio })}
-          onApply={onApply}
-          onCancel={onCancel}
-        />
-      )}
-    </div>
-  );
-}

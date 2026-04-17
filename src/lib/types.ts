@@ -7,6 +7,7 @@ export interface SongSection {
   chords: string[];
   mood?: string;
   instruments?: string[];
+  style?: string;       // per-section genre/style override (e.g. "country", "punk rock", "jazz")
   vocalists?: string[]; // vocalist IDs from vocalists.ts
   durationMs?: number;  // override auto-estimated section duration (3000–120000 ms)
 }

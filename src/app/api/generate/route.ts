@@ -8,8 +8,8 @@ export async function POST(req: NextRequest) {
   const body = await req.json() as Song & { forceInstrumental?: boolean };
   const { forceInstrumental, ...song } = body;
 
-  if (!song?.audioPrompt?.trim()) {
-    return NextResponse.json({ error: 'audioPrompt is required' }, { status: 400 });
+  if (!song?.genre?.trim()) {
+    return NextResponse.json({ error: 'genre is required' }, { status: 400 });
   }
 
   const provider = getAudioProvider();

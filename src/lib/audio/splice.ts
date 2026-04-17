@@ -5,7 +5,63 @@ export interface SpliceResult {
   wordTimestamps: WordTimestamp[];
 }
 
-const CROSSFADE_SECONDS = 0.3;
+const MAX_CROSSFADE_SECONDS = 1.0;
+const MIN_CROSSFADE_SECONDS = 0.1;
+
+/** RMS energy of a Float32Array slice, safe against out-of-bounds. */
+function rms(data: Float32Array, from: number, count: number): number {
+  const start = Math.max(0, from);
+  const end   = Math.min(data.length, from + count);
+  if (end <= start) return 0;
+  let sum = 0;
+  for (let i = start; i < end; i++) sum += data[i] * data[i];
+  return Math.sqrt(sum / (end - start));
+}
+
+/**
+ * Computes an energy-adaptive crossfade length in samples.
+ *
+ * Analyses the RMS at both splice boundaries (end-of-before, start-of-new,
+ * end-of-new, start-of-after) across all channels. Quiet / sparse audio
+ * gets a short crossfade; loud / dense music gets the full 1-second window.
+ *
+ * Scale: linear from MIN_CROSSFADE_SECONDS (RMS ≈ 0) to MAX_CROSSFADE_SECONDS
+ * (RMS ≥ 0.25 — typical for mastered music at −12 dBFS).
+ */
+function adaptiveCrossfadeSamples(
+  fullBuf: AudioBuffer,
+  newBuf:  AudioBuffer,
+  startSample: number,
+  endSample:   number,
+): number {
+  const { sampleRate } = fullBuf;
+  const windowSamples = Math.floor(MAX_CROSSFADE_SECONDS * sampleRate);
+  let totalRms = 0;
+  let measurements = 0;
+
+  for (let ch = 0; ch < fullBuf.numberOfChannels; ch++) {
+    const full  = fullBuf.getChannelData(ch);
+    const newCh = newBuf.getChannelData(Math.min(ch, newBuf.numberOfChannels - 1));
+
+    // Boundary A: end of "before" segment + start of new segment
+    totalRms += rms(full,  startSample - windowSamples, windowSamples);
+    totalRms += rms(newCh, 0,                           windowSamples);
+
+    // Boundary B: end of new segment + start of "after" segment
+    totalRms += rms(newCh, newBuf.length - windowSamples, windowSamples);
+    totalRms += rms(full,  endSample,                     windowSamples);
+
+    measurements += 4;
+  }
+
+  const avgRms = totalRms / Math.max(1, measurements);
+
+  // Map RMS → crossfade seconds (clamp at 0.25 = loud mastered music)
+  const t = Math.min(1, avgRms / 0.25);
+  const seconds = MIN_CROSSFADE_SECONDS + t * (MAX_CROSSFADE_SECONDS - MIN_CROSSFADE_SECONDS);
+
+  return Math.floor(seconds * sampleRate);
+}
 
 /**
  * Replaces a section of the full audio (defined by start/end ratios 0–1) with new
@@ -34,12 +90,14 @@ export async function spliceSection(
   await ctx.close();
 
   const { sampleRate, numberOfChannels } = fullBuf;
-  const startSample = Math.floor(sectionStartRatio * fullBuf.length);
-  const endSample = Math.floor(sectionEndRatio * fullBuf.length);
+  // Clamp so out-of-range ratios (section timings longer than actual audio) never overflow the buffer
+  const startSample = Math.max(0, Math.min(Math.floor(sectionStartRatio * fullBuf.length), fullBuf.length));
+  const endSample   = Math.max(startSample, Math.min(Math.floor(sectionEndRatio * fullBuf.length), fullBuf.length));
 
-  // Clamp crossfade so it never exceeds half the before/after segments or 25% of the new section
+  // Adaptive crossfade: longer at loud boundaries, shorter at quiet ones (100ms–1s)
+  // Also clamp so it never exceeds half the before/after segments or 25% of the new section
   const crossfadeSamples = Math.max(0, Math.min(
-    Math.floor(CROSSFADE_SECONDS * sampleRate),
+    adaptiveCrossfadeSamples(fullBuf, newBuf, startSample, endSample),
     Math.floor(startSample / 2),
     Math.floor((fullBuf.length - endSample) / 2),
     Math.floor(newBuf.length / 4),
@@ -170,11 +228,11 @@ export async function spliceVocals(
   }
 
   const { sampleRate } = fullBuf;
-  const startSample = Math.floor(sectionStartRatio * fullBuf.length);
-  const endSample   = Math.floor(sectionEndRatio   * fullBuf.length);
+  const startSample = Math.max(0, Math.min(Math.floor(sectionStartRatio * fullBuf.length), fullBuf.length));
+  const endSample   = Math.max(startSample, Math.min(Math.floor(sectionEndRatio * fullBuf.length), fullBuf.length));
 
   const crossfadeSamples = Math.max(0, Math.min(
-    Math.floor(CROSSFADE_SECONDS * sampleRate),
+    adaptiveCrossfadeSamples(fullBuf, newBuf, startSample, endSample),
     Math.floor(startSample / 2),
     Math.floor((fullBuf.length - endSample) / 2),
     Math.floor(newBuf.length / 4),
@@ -285,6 +343,95 @@ export async function spliceVocals(
     audioUrl: encodeWav(outBuf),
     wordTimestamps: [...beforeTs, ...newTs, ...afterTs],
   };
+}
+
+/**
+ * Inserts new audio at a specific time position (clean cut, no crossfade).
+ * Produces: before ++ new ++ after.
+ * Word timestamps before `insertAtMs` are unchanged; those at/after shift by the new audio duration.
+ */
+export async function insertAudioAtMs(
+  fullAudioUrl: string,
+  fullWordTimestamps: WordTimestamp[],
+  insertAtMs: number,
+  newAudioUrl: string,
+  newWordTimestamps: WordTimestamp[],
+): Promise<SpliceResult> {
+  const [fullArray, newArray] = await Promise.all([
+    fetch(fullAudioUrl).then(r => r.arrayBuffer()),
+    fetch(newAudioUrl).then(r => r.arrayBuffer()),
+  ]);
+
+  const ctx = new AudioContext();
+  const [fullBuf, newBuf] = await Promise.all([
+    ctx.decodeAudioData(fullArray),
+    ctx.decodeAudioData(newArray),
+  ]);
+  await ctx.close();
+
+  const { sampleRate } = fullBuf;
+  const numCh = Math.max(fullBuf.numberOfChannels, newBuf.numberOfChannels);
+  const insertSample = Math.min(Math.floor((insertAtMs / 1000) * sampleRate), fullBuf.length);
+  const outBuf = new AudioBuffer({ numberOfChannels: numCh, length: fullBuf.length + newBuf.length, sampleRate });
+
+  for (let ch = 0; ch < numCh; ch++) {
+    const out  = outBuf.getChannelData(ch);
+    const full = fullBuf.getChannelData(Math.min(ch, fullBuf.numberOfChannels - 1));
+    const neu  = newBuf.getChannelData(Math.min(ch, newBuf.numberOfChannels - 1));
+    out.set(full.subarray(0, insertSample), 0);
+    out.set(neu, insertSample);
+    out.set(full.subarray(insertSample), insertSample + newBuf.length);
+  }
+
+  const newDurationMs = (newBuf.length / sampleRate) * 1000;
+  const beforeTs = fullWordTimestamps.filter(w => w.end_ms <= insertAtMs);
+  const insertedTs = newWordTimestamps.map(w => ({
+    word:     w.word,
+    start_ms: w.start_ms + insertAtMs,
+    end_ms:   w.end_ms   + insertAtMs,
+  }));
+  const afterTs = fullWordTimestamps
+    .filter(w => w.start_ms >= insertAtMs)
+    .map(w => ({ word: w.word, start_ms: w.start_ms + newDurationMs, end_ms: w.end_ms + newDurationMs }));
+
+  return { audioUrl: encodeWav(outBuf), wordTimestamps: [...beforeTs, ...insertedTs, ...afterTs] };
+}
+
+/**
+ * Removes the audio region [startMs, endMs] from the audio file.
+ * Word timestamps within the removed region are discarded; those after endMs shift back by the removed duration.
+ */
+export async function cutAudioRegion(
+  audioUrl: string,
+  wordTimestamps: WordTimestamp[],
+  startMs: number,
+  endMs: number,
+): Promise<SpliceResult> {
+  const arrayBuf = await fetch(audioUrl).then(r => r.arrayBuffer());
+  const ctx = new AudioContext();
+  const audioBuf = await ctx.decodeAudioData(arrayBuf);
+  await ctx.close();
+
+  const { sampleRate, numberOfChannels } = audioBuf;
+  const startSample = Math.floor((startMs / 1000) * sampleRate);
+  const endSample   = Math.min(Math.floor((endMs / 1000) * sampleRate), audioBuf.length);
+  const outputLen   = Math.max(1, audioBuf.length - (endSample - startSample));
+  const outBuf = new AudioBuffer({ numberOfChannels, length: outputLen, sampleRate });
+
+  for (let ch = 0; ch < numberOfChannels; ch++) {
+    const out = outBuf.getChannelData(ch);
+    const src = audioBuf.getChannelData(ch);
+    out.set(src.subarray(0, startSample), 0);
+    out.set(src.subarray(endSample), startSample);
+  }
+
+  const removedMs = endMs - startMs;
+  const beforeTs  = wordTimestamps.filter(w => w.end_ms <= startMs);
+  const afterTs   = wordTimestamps
+    .filter(w => w.start_ms >= endMs)
+    .map(w => ({ word: w.word, start_ms: w.start_ms - removedMs, end_ms: w.end_ms - removedMs }));
+
+  return { audioUrl: encodeWav(outBuf), wordTimestamps: [...beforeTs, ...afterTs] };
 }
 
 function encodeWav(buffer: AudioBuffer): string {

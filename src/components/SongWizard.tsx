@@ -18,9 +18,11 @@ interface ChatMessage {
 
 interface Props {
   onSongReady: (song: Song, autoGenerate: boolean) => void;
-  onPlayRequest?: () => void;   // called when user asks to play the song
+  onPlayRequest?: () => void;   // called when user asks to generate/play the song
   audioReadyCount?: number;     // incremented by parent when audio generation completes
   resumeSignal?: number;        // increment to re-enable chat input after song is composed
+  instrumentalUrl?: string;     // current instrumental URL (for VocalRecorder)
+  songTitle?: string;           // current song title (for VocalRecorder download name)
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -79,20 +81,21 @@ function deriveJsonProgress(text: string): { pct: number; label: string } {
   return { pct, label };
 }
 
+const stripMarkdown = (s: string) => s.replace(/\*\*/g, '');
+
 function parseSong(text: string): { display: string; song: Song | null } {
   const match = text.match(/SONG_JSON_START\s*([\s\S]*?)\s*SONG_JSON_END/);
   if (!match) {
-    // Hide everything from SONG_JSON_START onwards while JSON is still streaming
     const startIdx = text.indexOf('SONG_JSON_START');
-    if (startIdx !== -1) return { display: text.slice(0, startIdx).trim(), song: null };
-    return { display: text, song: null };
+    if (startIdx !== -1) return { display: stripMarkdown(text.slice(0, startIdx).trim()), song: null };
+    return { display: stripMarkdown(text), song: null };
   }
   try {
     const song = JSON.parse(match[1]) as Song;
-    const display = text.replace(/SONG_JSON_START[\s\S]*?SONG_JSON_END/, '').trim();
+    const display = stripMarkdown(text.replace(/SONG_JSON_START[\s\S]*?SONG_JSON_END/, '').trim());
     return { display, song };
   } catch {
-    return { display: text, song: null };
+    return { display: stripMarkdown(text), song: null };
   }
 }
 
@@ -252,6 +255,9 @@ function SpeakingText({
         // Emoji-only tokens have no word timing — skip the counter
         if (/^[\p{Emoji_Presentation}\p{Extended_Pictographic}\u200d\ufe0f]+$/u.test(tok))
           return <span key={i}>{tok}</span>;
+        // Dash characters stripped from TTS text (em dash, en dash, etc.) have no timing slot
+        if (/^[\u2013\u2014\u2012\u2015]$/.test(tok) || /^-{2,}$/.test(tok))
+          return <span key={i}>{tok}</span>;
         const timing = tts.words[wi++];
         if (!timing) return <span key={i}>{tok}</span>;
         const active = playbackTime >= timing.startSec && playbackTime <= timing.endSec + 0.08;
@@ -277,7 +283,7 @@ function SpeakingText({
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount, resumeSignal }: Props) {
+export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount, resumeSignal, instrumentalUrl, songTitle }: Props) {
   const [character,     setCharacter]     = useState<Character | null>(null);
   const [started,       setStarted]       = useState(false);
   const [messages,      setMessages]      = useState<ChatMessage[]>([]);
@@ -287,6 +293,8 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
   const [speechSupported, setSpeechSupported] = useState(false);
   const [generatedSong, setGeneratedSong] = useState<Song | null>(null);
   const [chatDone,       setChatDone]       = useState(false);
+  const [chatCollapsed,  setChatCollapsed]  = useState(false);
+
   const [audioRequested, setAudioRequested] = useState(false);
   const [composingJson,       setComposingJson]       = useState(false);
   const [jsonProgress,        setJsonProgress]        = useState(5);
@@ -308,7 +316,8 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
   const recognitionRef  = useRef<any>(null);
   const continuousRef   = useRef(false);   // desired continuous-listen state
   const ttsPlayingRef   = useRef(false);   // true while TTS audio is playing — mic is muted
-  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const silenceTimerRef        = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const accumulatedTranscript  = useRef('');   // finals collected across session restarts
   const ttsAudioRef     = useRef<HTMLAudioElement | null>(null);
   const rafRef          = useRef<number | null>(null);
   const messagesRef     = useRef(messages);
@@ -319,13 +328,15 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
   const lastTtsRef      = useRef(-1);      // index of last message sent to TTS
   const startListeningRef = useRef<() => void>(() => {});
   const stopListeningRef  = useRef<() => void>(() => {});
-  const onPlayRequestRef  = useRef(onPlayRequest);
+  const onPlayRequestRef   = useRef(onPlayRequest);
+  const instrumentalUrlRef = useRef(instrumentalUrl);
 
   // Keep refs in sync
-  useEffect(() => { messagesRef.current    = messages;    }, [messages]);
-  useEffect(() => { loadingRef.current     = loading;     }, [loading]);
-  useEffect(() => { onSongReadyRef.current = onSongReady; }, [onSongReady]);
-  useEffect(() => { onPlayRequestRef.current = onPlayRequest; }, [onPlayRequest]);
+  useEffect(() => { messagesRef.current       = messages;       }, [messages]);
+  useEffect(() => { loadingRef.current        = loading;        }, [loading]);
+  useEffect(() => { onSongReadyRef.current    = onSongReady;    }, [onSongReady]);
+  useEffect(() => { onPlayRequestRef.current  = onPlayRequest;  }, [onPlayRequest]);
+  useEffect(() => { instrumentalUrlRef.current = instrumentalUrl; }, [instrumentalUrl]);
 
   // When audio generation completes, stop mic and speak the "ready" announcement
   const prevAudioReadyCount = useRef(0);
@@ -374,7 +385,7 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
   const speakMessage = useCallback(async (msgIndex: number, text: string) => {
     if (!text.trim()) return;
 
-    // Stop anything currently playing; abort mic so it doesn't pick up the tail
+    // Stop anything currently playing; abort mic so it doesn't pick up TTS output
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     ttsPlayingRef.current = true;
     recognitionRef.current?.abort();
@@ -504,22 +515,23 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
     const trimmed = text.trim();
     if (!trimmed || loadingRef.current) return;
 
-    // ── Detect "play my song" intent ─────────────────────────────────────────
+    // ── Detect "play" / playback intent ──────────────────────────────────────
     const playIntent = /\b(play|hear|listen to|start|launch)\b.*\b(song|track|music|it)\b/i.test(trimmed)
-                    || /\b(play it|play now|play the song)\b/i.test(trimmed);
-    if (playIntent && hasSongRef.current && generatedSongRef.current) {
-      // Song is built — trigger audio generation / playback
-      setAudioRequested(true);
+                    || /\b(play it|play now|play the song|hit play|press play|start playback|start playing|play back)\b/i.test(trimmed)
+                    || /^(play|go|start)[.!?]?$/i.test(trimmed.trim());
+    if (playIntent && (hasSongRef.current || instrumentalUrlRef.current)) {
       onPlayRequestRef.current?.();
       setInputText('');
-      const reply = 'On it! Generating the audio now…';
+      const hasAudio = !!instrumentalUrlRef.current;
+      const reply = hasAudio ? 'Playing now!' : 'On it! Generating the audio now…';
+      if (!hasAudio) setAudioRequested(true);
       const userIdx = messagesRef.current.length;
       const assistIdx = userIdx + 1;
       lastTtsRef.current = assistIdx;
       setMessages(prev => [
         ...prev,
         { role: 'user', content: trimmed, display: trimmed },
-        { role: 'assistant', content: reply, display: reply },
+        { role: 'assistant', content: reply, display: stripMarkdown(reply) },
       ]);
       void speakMessage(assistIdx, reply);
       return;
@@ -669,22 +681,40 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       rec.onresult = (e: any) => {
         let interim = '';
-        let final   = '';
+        let sessionFinal = '';
         for (let i = e.resultIndex; i < e.results.length; i++) {
           const r = e.results[i];
-          if (r.isFinal) final += r[0].transcript + ' ';
+          if (r.isFinal) sessionFinal += r[0].transcript + ' ';
           else           interim += r[0].transcript;
         }
-        setInputText(final.trim() || interim);
-        if (final.trim() && !loadingRef.current) {
-          // Clear any previous silence timer
-          if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-          const captured = final.trim();
-          // Wait 1 second of silence before sending
-          silenceTimerRef.current = setTimeout(() => {
+
+        // Accumulate finals across session restarts so a brief pause mid-sentence
+        // doesn't chop the utterance into separate messages.
+        if (sessionFinal.trim()) {
+          accumulatedTranscript.current = (accumulatedTranscript.current + ' ' + sessionFinal).trim();
+        }
+
+        // Show accumulated + current interim so the user sees the whole sentence building
+        const display = [accumulatedTranscript.current, interim].filter(Boolean).join(' ');
+        setInputText(display);
+
+        // Reset silence timer on every speech event — only fire when the user has
+        // genuinely stopped talking for 3.5 s.
+        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+        if (accumulatedTranscript.current) {
+          const attempt = () => {
+            const toSend = accumulatedTranscript.current;
+            if (!toSend.trim()) return;
+            if (loadingRef.current) {
+              // AI is still responding — retry in 500 ms rather than discarding
+              silenceTimerRef.current = setTimeout(attempt, 500);
+              return;
+            }
+            accumulatedTranscript.current = '';
             setInputText('');
-            void doSendMessage(captured);
-          }, 1000);
+            void doSendMessage(toSend);
+          };
+          silenceTimerRef.current = setTimeout(attempt, 3500);
         }
       };
 
@@ -776,7 +806,20 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
 
       {/* ── Header with settings toggle ── */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-[#f0f0f0]">
-        <span className="text-xs font-semibold text-[#929292] uppercase tracking-wider">{character ? CHARACTERS[character].name : 'Axel'}</span>
+        <button
+          onClick={() => setChatCollapsed(c => !c)}
+          className="flex items-center gap-1.5 text-xs font-semibold text-[#929292] uppercase tracking-wider hover:text-[#3b3b3b] transition-colors"
+          title={chatCollapsed ? 'Expand chat' : 'Collapse chat'}
+        >
+          <svg
+            className={`w-3 h-3 transition-transform ${chatCollapsed ? '-rotate-90' : ''}`}
+            fill="none" stroke="currentColor" viewBox="0 0 24 24"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
+          {character ? CHARACTERS[character].name : 'Axel'}
+        </button>
+
         <button
           onClick={() => setShowSettings(s => !s)}
           title="Voice settings"
@@ -791,7 +834,7 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
       </div>
 
       {/* ── Voice settings panel ── */}
-      {showSettings && (
+      {showSettings && !chatCollapsed && (
         <div className="px-4 py-3 border-b border-[#f0f0f0] bg-[#fafafa] flex flex-col gap-3">
           <div className="flex items-center gap-3">
             <label className="text-xs text-[#676767] w-16 flex-shrink-0">Speed</label>
@@ -806,11 +849,11 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
         </div>
       )}
 
-      {/* ── Messages ── */}
+      {/* ── Messages ── hidden when chat is done or collapsed */}
       <div
         ref={scrollRef}
-        className="flex flex-col gap-4 p-4 overflow-y-auto"
-        style={{ minHeight: 320, maxHeight: 520 }}
+        className={`flex flex-col gap-4 p-4 overflow-y-auto ${chatDone || chatCollapsed ? 'hidden' : ''}`}
+        style={{ minHeight: 160, maxHeight: 260 }}
       >
         {messages.map((msg, i) => (
           <div key={i} className={`flex gap-2.5 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
@@ -850,19 +893,39 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
 
       </div>
 
-      {/* ── Input area ── */}
-      <div className={`border-t border-[#e9e9e9] p-3 flex items-end gap-2 transition-opacity ${inputDisabled ? 'opacity-40 pointer-events-none' : ''}`}>
+      {/* ── Input area ── hidden when chat is done or collapsed */}
+      <div className={`border-t border-[#e9e9e9] p-3 flex items-center gap-2 transition-opacity ${chatDone || chatCollapsed ? 'hidden' : ''} ${inputDisabled ? 'opacity-40 pointer-events-none' : ''}`}>
         <textarea
           ref={inputRef}
           value={inputText}
           onChange={e => setInputText(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder={recording ? 'Listening… speak naturally, I\'ll send when you finish' : 'Type or tap the mic… (Enter to send)'}
-          rows={1}
+          rows={2}
           disabled={inputDisabled}
           className="flex-1 rounded-lg bg-[#f6f6f6] border border-[#e9e9e9] text-[#3b3b3b] px-3 py-2 text-sm resize-none focus:outline-none focus:ring-1 focus:ring-[#f37321] focus:border-[#f37321] disabled:opacity-60"
-          style={{ maxHeight: 120, lineHeight: '1.5' }}
+          style={{ maxHeight: 360, lineHeight: '1.5' }}
         />
+
+        {/* Stop TTS — shown to the left of mic while AI is speaking */}
+        {speakingIndex !== null && (
+          <button
+            onClick={() => {
+              ttsAudioRef.current?.pause();
+              ttsPlayingRef.current = false;
+              setSpeakingIndex(null);
+              setPlaybackTime(0);
+              if (rafRef.current) cancelAnimationFrame(rafRef.current);
+              if (continuousRef.current) startListeningRef.current();
+            }}
+            title="Stop speaking"
+            className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 bg-[#f37321] hover:bg-[#da6520] text-white transition-colors"
+          >
+            <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+              <rect x="6" y="6" width="12" height="12" rx="1" />
+            </svg>
+          </button>
+        )}
 
         {/* Mic — toggles continuous listening mode */}
         {speechSupported && (
@@ -895,47 +958,15 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
         </button>
       </div>
 
-      {/* ── Compose Song button — below input, before song exists ── */}
-      {started && !chatDone && !composingJson && !generatedSong && messages.length >= 4 && (
-        <div className="border-t border-[#e9e9e9] px-4 py-2.5 flex justify-end bg-[#fffaf6]">
-          <button
-            onClick={() => void doSendMessage('Yes, please compose my song!')}
-            disabled={loading}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[#f37321] hover:bg-[#da6520] disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors shadow-[0_2px_4px_rgba(243,115,33,0.3)]"
-          >
-            <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
-              <path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/>
-            </svg>
-            Compose Song
-          </button>
-        </div>
-      )}
-
       {/* ── Action bar — below input, shown once song is ready ── */}
-      {chatDone && !loading && generatedSong && (
-        <div className="border-t border-[#e9e9e9] px-4 py-2.5 flex items-center gap-2 bg-[#fffaf6] flex-wrap">
+      {chatDone && !chatCollapsed && !loading && generatedSong && (
+        <div className="border-t border-[#e9e9e9] px-4 py-2.5 flex items-center gap-2 bg-[#fffaf6]">
           <button
-            onClick={() => setChatDone(false)}
+            onClick={() => { setChatDone(false); setChatCollapsed(false); }}
             className="px-3 py-1.5 rounded-lg border border-[#d4d4d4] text-[#676767] hover:border-[#929292] hover:text-[#3b3b3b] text-xs font-semibold transition-colors"
           >
             Resume chat
           </button>
-          <div className="flex-1" />
-          {!audioRequested && (
-            <button
-              onClick={() => {
-                setAudioRequested(true);
-                onSongReady(generatedSong, false);
-                onPlayRequestRef.current?.();
-              }}
-              className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[#f37321] hover:bg-[#da6520] text-white text-sm font-semibold transition-colors shadow-[0_2px_4px_rgba(243,115,33,0.3)]"
-            >
-              <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M8 5v14l11-7z" />
-              </svg>
-              Hear my song
-            </button>
-          )}
         </div>
       )}
 

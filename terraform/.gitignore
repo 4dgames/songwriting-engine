@@ -1,0 +1,10 @@
+# Local variable values — never commit secrets
+terraform.tfvars
+*.tfvars
+!*.tfvars.example
+
+# Terraform state — use remote state (S3 + DynamoDB) for teams
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl

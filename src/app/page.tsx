@@ -47,8 +47,7 @@ export default function Home() {
 
   const [song,            setSong]            = useState<Song | null>(null);
   const [audioPrompt,     setAudioPrompt]     = useState('');
-  const [melodyUrl,       setMelodyUrl]       = useState<string | null>(null);
-  const [submittedPrompt, setSubmittedPrompt] = useState('');
+const [submittedPrompt, setSubmittedPrompt] = useState('');
   const [editingPrompt,   setEditingPrompt]   = useState(false);
   const [autoGenerate,    setAutoGenerate]    = useState(false);
   const [inputMode,       setInputMode]       = useState<InputMode>('wizard');
@@ -103,6 +102,14 @@ export default function Home() {
       try {
         const instrumentalBlob = await blobUrlToArrayBuffer(state.instrumentalUrl);
         const vocalsBlob = state.vocalsUrl ? await blobUrlToArrayBuffer(state.vocalsUrl) : null;
+        // First save of this session: find any existing auto-save with the same name to overwrite
+        if (!autoSaveIdRef.current) {
+          const autoSaveName = `${state.song.title} (auto-save)`;
+          const existing = await listProjects(userId);
+          const match = existing.find(p => p.name === autoSaveName);
+          if (match) autoSaveIdRef.current = match.id;
+        }
+
         const savedId = await saveProject(
           {
             name:            `${state.song.title} (auto-save)`,
@@ -117,7 +124,7 @@ export default function Home() {
             vocalsBlob,
             userId,
           },
-          autoSaveIdRef.current ?? undefined,  // overwrite existing slot if set
+          autoSaveIdRef.current ?? undefined,
         );
         autoSaveIdRef.current = savedId; // remember this slot for next tick
       } catch { /* best-effort — don't disrupt the user */ }
@@ -465,8 +472,6 @@ export default function Home() {
                 song={song}
                 audioPrompt={audioPrompt}
                 onAudioPromptChange={setAudioPrompt}
-                melodyUrl={melodyUrl}
-                onMelodyChange={setMelodyUrl}
                 autoGenerate={autoGenerate}
                 playRequestCount={playRequestCount}
                 sectionsOpen={sectionsOpen}

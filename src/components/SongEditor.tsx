@@ -4,7 +4,6 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 're
 import type { Song, SongSection, WordTimestamp, SectionTake } from '@/lib/types';
 import SectionEditor from './SectionEditor';
 import AudioPlayer from './AudioPlayer';
-import MelodyRecorder from './MelodyRecorder';
 import { splitStereoToTracks } from '@/lib/audio/split';
 import { toBlobUrl, mixTracks } from '@/lib/audio/mix';
 import TimelineEditor, { type TimelineTrack } from './TimelineEditor';
@@ -166,8 +165,6 @@ interface Props {
   song: Song;
   audioPrompt: string;
   onAudioPromptChange: (v: string) => void;
-  melodyUrl: string | null;
-  onMelodyChange: (url: string | null) => void;
   autoGenerate?: boolean;
   playRequestCount?: number;       // increment to request playback (generates if needed)
   onAudioReady?: () => void;       // called when first audio URL becomes available
@@ -235,7 +232,7 @@ function newSection(afterIndex: number, sections: SongSection[], tempo: number):
   };
 }
 
-const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ song: initial, audioPrompt, onAudioPromptChange, melodyUrl, onMelodyChange, autoGenerate, playRequestCount, onAudioReady, onGenerationStart, sectionsOpen, onSectionsOpenChange, onInstrumentalUrlChange, initialState }, ref) {
+const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ song: initial, audioPrompt, onAudioPromptChange, autoGenerate, playRequestCount, onAudioReady, onGenerationStart, sectionsOpen, onSectionsOpenChange, onInstrumentalUrlChange, initialState }, ref) {
   const [song, setSong] = useState<Song>(() => ({
     ...initial,
     sections: initial.sections.map(s => ({
@@ -316,8 +313,10 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
   const [playAudioTrigger,  setPlayAudioTrigger]  = useState(0);
   const [pauseAudioTrigger, setPauseAudioTrigger] = useState(0);
 
-  // Extra recorded vocal layers (stacked below the primary vocals track)
-  const [extraVocalTracks, setExtraVocalTracks] = useState<{ id: string; url: string; label: string }[]>([]);
+  // Recorded vocal takes — newest first; only the active one plays
+  const [extraVocalTracks,    setExtraVocalTracks]    = useState<{ id: string; url: string; label: string }[]>([]);
+  const [activeExtraVocalId,  setActiveExtraVocalId]  = useState<string | null>(null);
+  const [vocalsGo,            setVocalsGo]            = useState(false);
 
   // Timeline editor + mix-down
   const [showTimeline,  setShowTimeline]  = useState(false);
@@ -534,31 +533,16 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
     let wordTimestamps: WordTimestamp[] = [];
 
     try {
-      // ── Step 1: Generate the full mix ─────────────────────────────────────
-      // If a melody reference is set, use Replicate MusicGen (melody-conditioned).
-      // Otherwise use ElevenLabs as before.
-      if (melodyUrl) {
-        const melodyDataUrl = await blobUrlToDataUrl(melodyUrl);
-        const res = await fetch('/api/generate/melody', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ song, melodyDataUrl }),
-        });
-        if (!res.ok) throw new Error(await res.text());
-        ({ audioUrl, wordTimestamps } = await res.json() as {
-          audioUrl: string; wordTimestamps: WordTimestamp[];
-        });
-      } else {
-        const res = await fetch('/api/generate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...song, audioPrompt, forceInstrumental: useInstOnly }),
-        });
-        if (!res.ok) throw new Error(await res.text());
-        ({ audioUrl, wordTimestamps } = await res.json() as {
-          audioUrl: string; wordTimestamps: WordTimestamp[];
-        });
-      }
+      // ── Step 1: Generate the full mix via ElevenLabs ──────────────────────
+      const res = await fetch('/api/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...song, audioPrompt, forceInstrumental: useInstOnly }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      ({ audioUrl, wordTimestamps } = await res.json() as {
+        audioUrl: string; wordTimestamps: WordTimestamp[];
+      });
       setAudioProgress(100);
 
       // Trim any leading silence and shift timestamps to match
@@ -1076,49 +1060,45 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
       vocalsChunksRef.current = [];
 
       recorder.ondataavailable = e => { if (e.data.size > 0) vocalsChunksRef.current.push(e.data); };
-      // Capture whether a primary vocals track exists *at the moment recording started*
-      const hasPrimaryVocalsAtStart = !!liveVocalsUrl;
-      const recordingIndex = extraVocalTracks.length + (hasPrimaryVocalsAtStart ? 1 : 0);
+      // Take number is based on how many recorded takes already exist
+      const takeIndex = extraVocalTracks.length;
 
       recorder.onstop = async () => {
         vocalsStreamRef.current?.getTracks().forEach(t => t.stop());
         const blob = new Blob(vocalsChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
         const rawUrl = URL.createObjectURL(blob);
-        const label = `Vocals ${recordingIndex + 1}`;
+        const label = `Take ${takeIndex + 1}`;
 
         // Pad the recording with silence so it matches the instrumental duration.
-        // This makes the waveform visually align with the instrumental track.
         const instUrl = liveInstrumentalUrl;
         const url = instUrl ? await padToMatch(rawUrl, instUrl) : rawUrl;
 
-        if (hasPrimaryVocalsAtStart) {
-          // Stack as a new layer below the existing primary vocals track
-          const id = crypto.randomUUID();
-          setExtraVocalTracks(prev => [...prev, { id, url, label }]);
-        } else {
-          // No primary vocals yet — set as the primary track
-          setLiveVocalsUrl(url);
-          setSongTakes(prev => prev.map(t =>
-            t.id === activeSongTakeId ? { ...t, vocalsUrl: url } : t
-          ));
-          setAudioResetKey(k => k + 1);
-        }
+        // Always prepend as a new take — never overwrite existing vocals
+        const id = crypto.randomUUID();
+        setExtraVocalTracks(prev => [{ id, url, label }, ...prev]);
+        setActiveExtraVocalId(id);
         setVocalsStream(null);
         setVocalsRecording(false);
       };
 
-      // 3-2-1 countdown with beeps before recording starts
+      // 3-2-1 countdown with beeps
       for (const n of [3, 2, 1]) {
         setVocalsCountdown(n);
-        playBeep(n === 1 ? 880 : 440, 120); // higher pitch on "1"
+        playBeep(n === 1 ? 880 : 440, 120);
         await new Promise(r => setTimeout(r, 900));
       }
       setVocalsCountdown(null);
 
+      // "Go!" flash — then immediately start recording + playback
+      setVocalsGo(true);
+      playBeep(1200, 100, 0.5);
+      await new Promise(r => setTimeout(r, 350));
+      setVocalsGo(false);
+
       recorder.start(100);
       setVocalsRecording(true);
       setVocalsStream(stream);
-      setPlayAudioTrigger(prev => prev + 1); // start the instrumental playing
+      setPlayAudioTrigger(prev => prev + 1);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not access microphone — check browser permissions.');
     } finally {
@@ -1136,24 +1116,28 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
   /** Builds the track list passed to TimelineEditor */
   const buildTimelineTracks = (): TimelineTrack[] => {
     const result: TimelineTrack[] = [];
-    if (liveInstrumentalUrl) result.push({ id: 'instrumental', label: 'Instrumental', url: liveInstrumentalUrl, color: '#f37321' });
+    if (liveInstrumentalUrl) result.push({
+      id: 'instrumental', label: 'Instrumental', url: liveInstrumentalUrl, color: '#f37321',
+      wordTimestamps: liveWordTimestamps.length > 0 ? liveWordTimestamps : undefined,
+    });
     if (liveVocalsUrl)       result.push({ id: 'vocals-primary', label: 'Vocals 1',    url: liveVocalsUrl,       color: '#60a5fa' });
     extraVocalTracks.forEach(t => result.push({ id: t.id, label: t.label, url: t.url, color: '#34d399' }));
     return result;
   };
 
   /** Applies changes from the timeline editor back to the track state */
-  const handleTimelineApply = (updated: { id: string; url: string }[]) => {
-    for (const { id, url } of updated) {
-      if (id === 'instrumental')  setLiveInstrumentalUrl(url);
-      else if (id === 'vocals-primary') {
+  const handleTimelineApply = (updated: { id: string; url: string; timestamps?: WordTimestamp[] }[]) => {
+    for (const { id, url, timestamps } of updated) {
+      if (id === 'instrumental') {
+        setLiveInstrumentalUrl(url);
+        if (timestamps) setLiveWordTimestamps(timestamps);
+      } else if (id === 'vocals-primary') {
         setLiveVocalsUrl(url);
         setSongTakes(prev => prev.map(t => t.id === activeSongTakeId ? { ...t, vocalsUrl: url } : t));
       } else {
         setExtraVocalTracks(prev => prev.map(t => t.id === id ? { ...t, url } : t));
       }
     }
-    setShowTimeline(false);
     setAudioResetKey(k => k + 1);
   };
 
@@ -1346,7 +1330,7 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
         </div>
         <div className="mt-4 pt-4 border-t border-[#e9e9e9]">
           <div className="flex items-center justify-between gap-4">
-            {/* Left: Edit Sections (when collapsed) + Hum a melody + Regenerate Plan */}
+            {/* Left: Edit Sections (when collapsed) + Regenerate Plan */}
             <div className="flex items-center gap-3 flex-1 min-w-0">
               {hasAudio && !sectionsOpen && (
                 <button
@@ -1359,7 +1343,6 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
                   Edit Sections
                 </button>
               )}
-              <MelodyRecorder onMelodyChange={onMelodyChange} />
               {/* Regenerate Plan — left side so Generate Audio stays uncluttered */}
               <button
                 onClick={() => void generateAudio()}
@@ -1550,42 +1533,6 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
           {error && <p className="text-sm text-red-600">{error}</p>}
           {/* Takes bar */}
           <div className="flex items-center gap-2 flex-wrap">
-            <div className="flex-1" />
-            {/* Edit Timeline + Mix Down — inline with takes */}
-            {liveInstrumentalUrl && (
-              <>
-                <button
-                  onClick={() => setShowTimeline(true)}
-                  className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium border border-[#e0e0e0] text-[#929292] hover:text-[#f37321] hover:border-[#f37321] transition-colors"
-                  title="Open timeline editor"
-                >
-                  <svg className="w-3 h-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                    <rect x="1" y="4" width="6" height="3" rx="0.5"/><rect x="9" y="4" width="6" height="3" rx="0.5"/><rect x="3" y="9" width="7" height="3" rx="0.5"/>
-                  </svg>
-                  Edit Timeline
-                </button>
-                <button
-                  onClick={handleMixDown}
-                  disabled={mixingDown}
-                  className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium border border-[#e0e0e0] text-[#929292] hover:text-[#f37321] hover:border-[#f37321] transition-colors disabled:opacity-40"
-                  title="Mix all tracks down to a WAV file"
-                >
-                  <svg className="w-3 h-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                    <path d="M8 2v8M5 7l3 3 3-3M2 13h12"/>
-                  </svg>
-                  {mixingDown ? 'Mixing…' : 'Mix Down'}
-                </button>
-              </>
-            )}
-            {separationMethod && (
-              <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
-                separationMethod === 'elevenlabs'
-                  ? 'bg-[#e8f5e9] text-[#2e7d32]'
-                  : 'bg-[#fff3e0] text-[#e65100]'
-              }`}>
-                {separationMethod === 'elevenlabs' ? 'ElevenLabs stems' : 'ICA fallback'}
-              </span>
-            )}
             <span className="text-xs font-semibold text-[#929292] uppercase tracking-widest">Takes</span>
             {songTakes.map(take => (
               <div key={take.id}>
@@ -1619,6 +1566,42 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
                 )}
               </div>
             ))}
+            {/* Spacer + Edit Tracks + Mix Down — far right */}
+            <div className="flex-1" />
+            {separationMethod && (
+              <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
+                separationMethod === 'elevenlabs'
+                  ? 'bg-[#e8f5e9] text-[#2e7d32]'
+                  : 'bg-[#fff3e0] text-[#e65100]'
+              }`}>
+                {separationMethod === 'elevenlabs' ? 'ElevenLabs stems' : 'ICA fallback'}
+              </span>
+            )}
+            {liveInstrumentalUrl && (
+              <>
+                <button
+                  onClick={() => setShowTimeline(true)}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium border border-[#e0e0e0] text-[#929292] hover:text-[#f37321] hover:border-[#f37321] transition-colors"
+                  title="Open track editor"
+                >
+                  <svg className="w-3 h-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <rect x="1" y="4" width="6" height="3" rx="0.5"/><rect x="9" y="4" width="6" height="3" rx="0.5"/><rect x="3" y="9" width="7" height="3" rx="0.5"/>
+                  </svg>
+                  Edit Tracks
+                </button>
+                <button
+                  onClick={handleMixDown}
+                  disabled={mixingDown}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium border border-[#e0e0e0] text-[#929292] hover:text-[#f37321] hover:border-[#f37321] transition-colors disabled:opacity-40"
+                  title="Mix all tracks down to a WAV file"
+                >
+                  <svg className="w-3 h-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <path d="M8 2v8M5 7l3 3 3-3M2 13h12"/>
+                  </svg>
+                  {mixingDown ? 'Mixing…' : 'Mix Down'}
+                </button>
+              </>
+            )}
           </div>
 
           {/* Active AudioPlayer */}
@@ -1654,20 +1637,17 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
               playSectionRequest={playSectionRequest ?? undefined}
               vocalsRecordingStream={vocalsStream}
               extraVocalTracks={extraVocalTracks}
-              onDeleteVocalsTrack={id => setExtraVocalTracks(prev => prev.filter(t => t.id !== id))}
+              onDeleteVocalsTrack={id => {
+                setExtraVocalTracks(prev => {
+                  const next = prev.filter(t => t.id !== id);
+                  if (id === activeExtraVocalId) setActiveExtraVocalId(next[0]?.id ?? null);
+                  return next;
+                });
+              }}
+              activeExtraVocalId={activeExtraVocalId}
+              onSelectExtraVocal={setActiveExtraVocalId}
               onDeletePrimaryVocals={() => {
                 setLiveVocalsUrl(undefined);
-                setAudioResetKey(k => k + 1);
-              }}
-              onTrackEdited={(trackId, newUrl) => {
-                if (trackId === 'instrumental') {
-                  setLiveInstrumentalUrl(newUrl);
-                } else if (trackId === 'vocals') {
-                  setLiveVocalsUrl(newUrl);
-                  setSongTakes(prev => prev.map(t => t.id === activeSongTakeId ? { ...t, vocalsUrl: newUrl } : t));
-                } else {
-                  setExtraVocalTracks(prev => prev.map(t => t.id === trackId ? { ...t, url: newUrl } : t));
-                }
                 setAudioResetKey(k => k + 1);
               }}
             />
@@ -1686,7 +1666,7 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
         />
       )}
 
-      {/* 3-2-1 Countdown modal — centered overlay */}
+      {/* 3-2-1 Countdown modal */}
       {vocalsCountdown !== null && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm pointer-events-none">
           <div className="flex flex-col items-center gap-3">
@@ -1702,15 +1682,28 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
         </div>
       )}
 
-      {/* Fixed Stop Recording button — always visible while recording */}
+      {/* "Go!" flash */}
+      {vocalsGo && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center pointer-events-none">
+          <span
+            className="text-[160px] font-black text-[#f37321] leading-none"
+            style={{ textShadow: '0 0 60px rgba(243,115,33,0.9)', animation: 'countdownPop 0.2s ease-out' }}
+          >
+            Go!
+          </span>
+        </div>
+      )}
+
+      {/* Stop Recording button — large, top center */}
       {vocalsRecording && (
-        <div className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[60]">
+        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[60]">
           <button
             type="button"
             onClick={stopVocalsRecording}
-            className="flex items-center gap-2 px-6 py-3 rounded-full border-2 border-red-500 bg-white text-red-600 hover:bg-red-50 text-sm font-bold shadow-[0_4px_24px_rgba(239,68,68,0.4)] transition-all"
+            className="flex items-center gap-3 px-12 py-5 rounded-full border-3 border-red-500 bg-white text-red-600 hover:bg-red-50 text-2xl font-black shadow-[0_8px_40px_rgba(239,68,68,0.5)] transition-all"
+            style={{ border: '3px solid rgb(239 68 68)' }}
           >
-            <span className="w-3 h-3 rounded-full bg-red-500 animate-pulse flex-shrink-0" />
+            <span className="w-5 h-5 rounded-full bg-red-500 animate-pulse flex-shrink-0" />
             Stop Recording
           </button>
         </div>

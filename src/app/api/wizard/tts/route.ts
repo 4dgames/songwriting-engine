@@ -40,8 +40,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'ELEVENLABS_API_KEY not configured' }, { status: 503 });
   }
 
-  const { text, rate, voiceId: bodyVoiceId } = await req.json() as { text: string; rate?: number; voiceId?: string };
-  if (!text?.trim()) return NextResponse.json({ error: 'text required' }, { status: 400 });
+  const { text: rawText, rate, voiceId: bodyVoiceId } = await req.json() as { text: string; rate?: number; voiceId?: string };
+  if (!rawText?.trim()) return NextResponse.json({ error: 'text required' }, { status: 400 });
+  // Strip dash/hyphen punctuation that TTS models tend to vocalise as "dash" or "hyphen"
+  const text = rawText.replace(/[\u2013\u2014\u2012\u2015]|--+/g, ' ').replace(/ - /g, ' ').replace(/\s{2,}/g, ' ').trim();
   const speed = Math.min(1.2, Math.max(0.7, rate ?? 1.0));
 
   const voiceId = process.env.ELEVENLABS_WIZARD_VOICE_ID ?? bodyVoiceId ?? 'JBFqnCBsd6RMkjVDRZzb';
@@ -55,7 +57,8 @@ export async function POST(req: NextRequest) {
       body: JSON.stringify({
         text: text.trim(),
         model_id: 'eleven_turbo_v2_5',
-        voice_settings: { stability: 0.40, similarity_boost: 0.75, style: 0.10, speed },
+        voice_settings: { stability: 0.40, similarity_boost: 0.75, style: 0.10 },
+        speed,
       }),
     },
   );
