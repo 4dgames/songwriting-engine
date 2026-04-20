@@ -49,6 +49,7 @@ export interface Props {
   tracks:  TimelineTrack[];
   onApply: (updated: { id: string; url: string; timestamps?: WordTimestamp[] }[]) => void;
   onClose: () => void;
+  inline?: boolean;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -141,7 +142,7 @@ function adjustTimestampsForCopy(
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
-export default function TimelineEditor({ tracks, onApply, onClose }: Props) {
+export default function TimelineEditor({ tracks, onApply, onClose, inline }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef   = useRef<HTMLDivElement>(null);
   const rafRef    = useRef(0);
@@ -762,12 +763,13 @@ export default function TimelineEditor({ tracks, onApply, onClose }: Props) {
   // ── Render ─────────────────────────────────────────────────────────────────
   const canvasH = HEADER_H + tracks.length * TRACK_H;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
-      <div
-        className="bg-[#0f0f0f] border border-[#252525] rounded-xl shadow-2xl flex flex-col"
-        style={{ width: 'min(1280px, 96vw)', maxHeight: '88vh' }}
-      >
+  const inner = (
+    <div
+      className={inline
+        ? 'bg-[#0f0f0f] border border-[#252525] rounded-xl flex flex-col'
+        : 'bg-[#0f0f0f] border border-[#252525] rounded-xl shadow-2xl flex flex-col'}
+      style={inline ? undefined : { width: 'min(1280px, 96vw)', maxHeight: '88vh' }}
+    >
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-[#1e1e1e] flex-shrink-0">
           <h2 className="text-white font-semibold text-sm tracking-wide">Timeline Editor</h2>
@@ -864,7 +866,7 @@ export default function TimelineEditor({ tracks, onApply, onClose }: Props) {
               disabled={applying}
               className="px-3 py-1.5 text-xs bg-[#1e1e1e] hover:bg-[#2a2a2a] text-neutral-400 hover:text-white rounded-md font-medium"
             >
-              {applying ? 'Applying…' : 'Close'}
+              {applying ? 'Applying…' : inline ? 'Done' : 'Close'}
             </button>
           </div>
         </div>
@@ -894,7 +896,12 @@ export default function TimelineEditor({ tracks, onApply, onClose }: Props) {
           <span>Move mode: drag track left/right to shift its start</span>
           <span>Select mode: drag to select a region; drag selection to reposition it</span>
         </div>
-      </div>
+    </div>
+  );
+  if (inline) return inner;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+      {inner}
     </div>
   );
 }

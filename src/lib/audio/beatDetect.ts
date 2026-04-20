@@ -81,6 +81,79 @@ function encodeWavBlob(buffer: AudioBuffer): Blob {
 }
 
 /**
+ * Trims a matched pair of instrumental + vocal tracks to beat 1 using only
+ * the instrumental's beat-phase as the reference.
+ *
+ * Beat-phase detection relies on onset energy (drum hits, transients). Vocal
+ * stems have no percussion, so their phase estimate is unreliable and often
+ * differs from the instrumental's by tens of milliseconds. Applying a
+ * different trim to each track causes the two stems to drift apart at every
+ * section boundary. This function detects the phase once from the
+ * instrumental (which has clear rhythmic transients) and applies the exact
+ * same trim to both tracks — keeping them sample-accurate.
+ *
+ * If the instrumental has no detectable pre-beat content (< 20 ms offset)
+ * neither track is modified.
+ *
+ * If the two tracks have different leading silence (e.g. from a stem
+ * separator that gave them different offsets), the vocal is padded at the
+ * front to bring its beat 1 into alignment with the trimmed instrumental's.
+ */
+export async function trimPairToDownbeat(
+  instUrl: string,
+  vocUrl:  string,
+  tempo:   number,
+): Promise<{ instUrl: string; vocUrl: string; trimmedMs: number }> {
+  const ctx = new AudioContext();
+  const [instBuf, vocBuf] = await Promise.all([
+    fetch(instUrl).then(r => r.arrayBuffer()).then(ab => ctx.decodeAudioData(ab)),
+    fetch(vocUrl) .then(r => r.arrayBuffer()).then(ab => ctx.decodeAudioData(ab)),
+  ]);
+  await ctx.close();
+
+  const beatPeriodMs = 60000 / tempo;
+  const instPhaseMs  = detectBeatPhaseMs(instBuf, tempo);
+
+  if (instPhaseMs < 20 || instPhaseMs > beatPeriodMs * 0.9) {
+    // Instrumental already starts at (or very close to) beat 1 — nothing to trim.
+    // Still check if the vocal has extra leading silence relative to the instrumental
+    // and pad the instrumental to compensate (fill in with silence as requested).
+    const vocPhaseMs = detectBeatPhaseMs(vocBuf, tempo);
+    const diffMs = vocPhaseMs - instPhaseMs; // positive → vocal starts beat 1 later
+    if (diffMs >= 20 && diffMs <= beatPeriodMs * 0.9) {
+      // Vocal has more pre-beat content than instrumental → trim vocal to match
+      const trimmed = await trimBufferByMs(vocBuf, diffMs);
+      return { instUrl, vocUrl: URL.createObjectURL(encodeWavBlob(trimmed)), trimmedMs: 0 };
+    }
+    return { instUrl, vocUrl, trimmedMs: 0 };
+  }
+
+  // Trim both tracks by the instrumental's detected beat-phase offset.
+  const [newInst, newVoc] = await Promise.all([
+    trimBufferByMs(instBuf, instPhaseMs),
+    trimBufferByMs(vocBuf,  instPhaseMs),
+  ]);
+
+  return {
+    instUrl:   URL.createObjectURL(encodeWavBlob(newInst)),
+    vocUrl:    URL.createObjectURL(encodeWavBlob(newVoc)),
+    trimmedMs: instPhaseMs,
+  };
+}
+
+async function trimBufferByMs(buf: AudioBuffer, ms: number): Promise<AudioBuffer> {
+  const trimSamples = Math.round((ms / 1000) * buf.sampleRate);
+  const newLength   = buf.length - trimSamples;
+  if (newLength <= 0) return buf;
+  const offline = new OfflineAudioContext(buf.numberOfChannels, newLength, buf.sampleRate);
+  const src     = offline.createBufferSource();
+  src.buffer    = buf;
+  src.connect(offline.destination);
+  src.start(0, ms / 1000);
+  return offline.startRendering();
+}
+
+/**
  * Returns the time in milliseconds of the first beat-1 in the audio.
  * Uses onset-strength template matching: slides a pulse train at the
  * known tempo across the onset-strength signal and finds the phase that
@@ -137,13 +210,16 @@ export function detectBeatPhaseMs(audioBuffer: AudioBuffer, tempo: number): numb
 }
 
 /**
- * Snaps each section start ratio to the nearest 4-beat phrase boundary.
+ * Snaps each section start ratio to the nearest bar boundary (every 4 beats).
+ *
+ * Bar boundaries are at: beatPhaseMs + n * 4 * beatDurationMs  (n = 0, 1, 2, …)
+ *
+ * This keeps section markers aligned with bar-number labels in the timeline.
  *
  * Rules:
- * - Section 0 always stays at 0 (song start is already beat 1).
- * - Each subsequent section snaps to the closest 4-beat boundary
+ * - Section 0 always stays at 0 (song start, before beat 1).
+ * - Each subsequent section snaps to the closest bar boundary
  *   that is still strictly after the previous snapped boundary.
- * - We never snap backward past the previous section.
  */
 export function snapSectionsToPhrases(
   rawRatios: number[],
@@ -154,33 +230,32 @@ export function snapSectionsToPhrases(
   if (rawRatios.length === 0 || audioDurationMs <= 0) return rawRatios;
 
   const beatDurationMs = 60000 / tempo;
-  const phraseDurationMs = 4 * beatDurationMs; // 4-beat grid (LCM of 4/8/16)
+  const barDurationMs  = 4 * beatDurationMs; // one bar = 4 beats
 
   const snapped: number[] = [0]; // section 0 always at start
 
   for (let i = 1; i < rawRatios.length; i++) {
-    const rawMs = rawRatios[i] * audioDurationMs;
+    const rawMs         = rawRatios[i] * audioDurationMs;
     const prevSnappedMs = snapped[i - 1] * audioDurationMs;
 
-    // How many full phrases fit between beatPhaseMs and rawMs?
+    // Which bar boundary is closest to rawMs?
     const relativeMs = rawMs - beatPhaseMs;
-    const n = Math.floor(relativeMs / phraseDurationMs);
+    const n = Math.floor(relativeMs / barDurationMs);
 
-    // Candidate boundaries: the phrase just before and just after rawMs
+    // Candidates: bar just before and bar just after rawMs
     const candidates = [
-      beatPhaseMs + n * phraseDurationMs,
-      beatPhaseMs + (n + 1) * phraseDurationMs,
+      beatPhaseMs + n       * barDurationMs,
+      beatPhaseMs + (n + 1) * barDurationMs,
     ].filter(ms => ms > prevSnappedMs && ms >= 0);
 
     let snappedMs: number;
     if (candidates.length === 0) {
-      // Fallback: just use the next phrase boundary after prevSnappedMs
-      const fallbackN = Math.ceil((prevSnappedMs - beatPhaseMs) / phraseDurationMs) + 1;
-      snappedMs = beatPhaseMs + fallbackN * phraseDurationMs;
+      // Fallback: next bar boundary after prevSnappedMs
+      const fallbackN = Math.ceil((prevSnappedMs - beatPhaseMs) / barDurationMs) + 1;
+      snappedMs = beatPhaseMs + fallbackN * barDurationMs;
     } else {
-      // Pick closest candidate to rawMs
       snappedMs = candidates.reduce((best, c) =>
-        Math.abs(c - rawMs) < Math.abs(best - rawMs) ? c : best
+        Math.abs(c - rawMs) < Math.abs(best - rawMs) ? c : best,
       );
     }
 

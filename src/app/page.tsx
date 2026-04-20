@@ -3,6 +3,59 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSession, signIn, signOut } from 'next-auth/react';
 import type { Song } from '@/lib/types';
+
+const DEMO_SONG: Song = {
+  title: 'Neon Shadows',
+  genre: 'Synth-pop',
+  mood: 'Melancholic yet driving',
+  tempo: 118,
+  key: 'F minor',
+  audioPrompt: 'Synth-pop, 118bpm, F minor, melancholic driving energy, lush pads, punchy drums, atmospheric reverb vocals',
+  sections: [
+    {
+      type: 'intro',
+      label: 'Intro',
+      lyrics: '',
+      chords: ['Fm', 'Db', 'Ab', 'Eb'],
+    },
+    {
+      type: 'verse',
+      label: 'Verse 1',
+      lyrics: 'City lights bleed into rain\nNeon ghosts on every lane\nI keep searching for your face\nIn this cold electric maze',
+      chords: ['Fm', 'Db', 'Ab', 'Cm'],
+    },
+    {
+      type: 'pre-chorus',
+      label: 'Pre-Chorus',
+      lyrics: 'Something pulls me back\nTo the edge of what we had',
+      chords: ['Db', 'Eb', 'Cm', 'Eb'],
+    },
+    {
+      type: 'chorus',
+      label: 'Chorus',
+      lyrics: "We burn like neon in the dark\nFade but never fall apart\nChasing shadows, chasing sparks\nYou're the rhythm of my heart",
+      chords: ['Ab', 'Eb', 'Fm', 'Db'],
+    },
+    {
+      type: 'verse',
+      label: 'Verse 2',
+      lyrics: 'Signals lost in static haze\nYour voice echoes through the days\nEvery corner, every turn\nAnother lesson left to learn',
+      chords: ['Fm', 'Db', 'Ab', 'Cm'],
+    },
+    {
+      type: 'bridge',
+      label: 'Bridge',
+      lyrics: 'Maybe I was wrong to believe\nThat love could outrun what we leave\nBut in the flicker of this screen\nI see everything we could have been',
+      chords: ['Dbmaj7', 'Cm7', 'Bbm', 'Eb'],
+    },
+    {
+      type: 'outro',
+      label: 'Outro',
+      lyrics: 'Neon shadows fade to black\nNo way forward, no way back',
+      chords: ['Fm', 'Db', 'Ab', 'Eb'],
+    },
+  ],
+};
 import PromptInput from '@/components/PromptInput';
 import SongEditor, { type SongEditorHandle } from '@/components/SongEditor';
 import SongWizard from '@/components/SongWizard';
@@ -44,7 +97,6 @@ type InputMode = 'wizard' | 'prompt';
 export default function Home() {
   const { data: session, status: authStatus } = useSession();
   const userId = (session?.user as { id?: string } | undefined)?.id;
-
   const [song,            setSong]            = useState<Song | null>(null);
   const [audioPrompt,     setAudioPrompt]     = useState('');
 const [submittedPrompt, setSubmittedPrompt] = useState('');
@@ -58,6 +110,7 @@ const [submittedPrompt, setSubmittedPrompt] = useState('');
   const [playRequestCount, setPlayRequestCount] = useState(0);
   const [audioReadyCount,  setAudioReadyCount]  = useState(0);
   const [sectionsOpen,        setSectionsOpen]        = useState(true);
+  const [showInputPanel,      setShowInputPanel]      = useState(true);
   const [resumeChatSignal,    setResumeChatSignal]    = useState(0);
   const [liveInstrumentalUrl, setLiveInstrumentalUrl] = useState('');
   const [songKey,             setSongKey]             = useState(0);
@@ -74,6 +127,19 @@ const [submittedPrompt, setSubmittedPrompt] = useState('');
   const scrollRef     = useRef<HTMLDivElement>(null);
   // Stable ID for the auto-save slot — one entry per song session, overwritten each time
   const autoSaveIdRef = useRef<string | null>(null);
+
+  // ?demo=1 — instantly hydrate with a mock song for development / screenshot purposes
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('demo') === '1') {
+      setSong(DEMO_SONG);
+      setAudioPrompt(DEMO_SONG.audioPrompt);
+      setInputMode('prompt');
+      setSubmittedPrompt('(demo mode)');
+      setSongKey(k => k + 1);
+      setShowInputPanel(false);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (loading) {
@@ -168,6 +234,7 @@ const [submittedPrompt, setSubmittedPrompt] = useState('');
       setSong(data);
       setAudioPrompt(data.audioPrompt);
       setSongKey(k => k + 1);
+      setShowInputPanel(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong');
     } finally {
@@ -188,6 +255,7 @@ const [submittedPrompt, setSubmittedPrompt] = useState('');
     setSubmittedPrompt('');       // wizard flow — no single prompt string
     setAutoGenerate(shouldAutoGenerate);
     setSongKey(k => k + 1);
+    setShowInputPanel(false);
   };
 
   // ── Save current project ─────────────────────────────────────────────────────
@@ -261,6 +329,7 @@ const [submittedPrompt, setSubmittedPrompt] = useState('');
       setSong(stored.song);
       setSongKey(k => k + 1);
       setSectionsOpen(false);
+      setShowInputPanel(false);
     } catch (err) {
       alert(`Load failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -284,6 +353,7 @@ const [submittedPrompt, setSubmittedPrompt] = useState('');
     setInitialState(undefined);
     setSongKey(k => k + 1);
     setSectionsOpen(true);
+    setShowInputPanel(true);
     setLiveInstrumentalUrl('');
   }, [song]);
 
@@ -391,8 +461,8 @@ const [submittedPrompt, setSubmittedPrompt] = useState('');
             Song Maker
           </h1>
 
-          {/* ── Mode toggle ── */}
-          <div className="flex justify-center">
+          {/* ── Mode toggle — hidden once a song is loaded ── */}
+          <div className={showInputPanel ? 'flex justify-center' : 'hidden'}>
             <div className="flex items-center gap-0 rounded-lg border border-[#e9e9e9] bg-[#f6f6f6] p-0.5">
               {(['wizard', 'prompt'] as InputMode[]).map(mode => (
                 <button
@@ -410,8 +480,9 @@ const [submittedPrompt, setSubmittedPrompt] = useState('');
             </div>
           </div>
 
-          {/* ── Centred ½-width input column ── */}
-          <div className="flex flex-col gap-3 w-1/2 min-w-72 mx-auto">
+          {/* ── Centred ½-width input column — hidden (not unmounted) once song loaded ── */}
+          <div className={showInputPanel ? 'flex justify-center' : 'hidden'}>
+          <div className="flex flex-col gap-3 w-1/2 min-w-72">
 
             {/* Wizard mode — always mounted to preserve chat state */}
             <div className={inputMode === 'wizard' ? '' : 'hidden'}>
@@ -462,6 +533,22 @@ const [submittedPrompt, setSubmittedPrompt] = useState('');
               </>
             </div>
           </div>
+          </div>
+
+          {/* ── Edit Song Plan button — shown when input panel is collapsed ── */}
+          {song && !showInputPanel && (
+            <div className="flex justify-center">
+              <button
+                onClick={() => setShowInputPanel(true)}
+                className="flex items-center gap-2 px-4 py-2 rounded-lg border border-[#bdbdbd] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] text-sm font-semibold transition-colors"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                </svg>
+                Edit Song Plan
+              </button>
+            </div>
+          )}
 
           {/* ── Full-width song editor ── */}
           {song && (
@@ -478,6 +565,7 @@ const [submittedPrompt, setSubmittedPrompt] = useState('');
                 onSectionsOpenChange={setSectionsOpen}
                 onInstrumentalUrlChange={setLiveInstrumentalUrl}
                 initialState={initialState}
+                onEditSongPlan={() => setShowInputPanel(true)}
                 onGenerationStart={() => { /* overlay is fixed — no scroll needed */ }}
                 onAudioReady={() => {
                   setAudioReadyCount(c => c + 1);

@@ -29,7 +29,7 @@ SONG_JSON_START
 { ...song JSON... }
 SONG_JSON_END
 
-After the closing SONG_JSON_END marker, on the next line write one short excited message telling them the song is written, invite them to hear it, and remind them they can edit the sections anytime. Like: "Your song is written! Hit Hear My Song to listen, or edit any section first — it's all yours!" (vary the wording each time, keep it short and encouraging).
+After the closing SONG_JSON_END marker, on the next line write one short excited message telling them the song is written, invite them to hear it, and remind them they can edit the sections anytime. Like: "Your song is written! Hit Generate Music to listen, or edit any section first — it's all yours!" (vary the wording each time, keep it short and encouraging).
 
 SONG JSON SCHEMA (output valid JSON with no trailing commas)
 {

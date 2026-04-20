@@ -9,7 +9,9 @@ export interface SongSection {
   instruments?: string[];
   style?: string;       // per-section genre/style override (e.g. "country", "punk rock", "jazz")
   vocalists?: string[]; // vocalist IDs from vocalists.ts
-  durationMs?: number;  // override auto-estimated section duration (3000–120000 ms)
+  durationMs?: number;  // override duration in ms
+  positiveStylesAdd?: string[];    // user-added positive style tags
+  positiveStylesRemove?: string[]; // computed positive style tags the user removed
 }
 
 export interface WordTimestamp {
@@ -38,4 +40,8 @@ export interface Song {
   audioPrompt: string;
   audioUrl?: string;
   wordTimestamps?: WordTimestamp[];
+  positiveGlobalAdd?: string[];    // user-added positive global style tags
+  positiveGlobalRemove?: string[]; // computed positive global tags the user removed
+  negativeGlobalAdd?: string[];    // user-added negative global style tags
+  negativeGlobalRemove?: string[]; // computed negative global tags the user removed
 }

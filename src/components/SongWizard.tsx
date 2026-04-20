@@ -312,12 +312,22 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
   // ── Refs (avoid stale closures in async/speech callbacks) ──
   const scrollRef       = useRef<HTMLDivElement>(null);
   const inputRef        = useRef<HTMLTextAreaElement>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const recognitionRef  = useRef<any>(null);
   const continuousRef   = useRef(false);   // desired continuous-listen state
   const ttsPlayingRef   = useRef(false);   // true while TTS audio is playing — mic is muted
-  const silenceTimerRef        = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const accumulatedTranscript  = useRef('');   // finals collected across session restarts
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null); // retry timer when AI is loading
+  const accumulatedTranscript = useRef('');  // finals collected between speech_final events
+  // Deepgram WebSocket STT refs
+  const dgSocketRef   = useRef<WebSocket | null>(null);
+  const dgRecorderRef = useRef<MediaRecorder | null>(null);
+  const dgStreamRef   = useRef<MediaStream | null>(null);
+  // Barge-in detection — AudioContext analyser that monitors mic energy during TTS
+  const bargeInRef    = useRef<{ actx: AudioContext; raf: number } | null>(null);
+  // Text currently being spoken by TTS — used to filter AI voice bleed from the mic
+  const ttsTextRef    = useRef('');
+  // Whether the current inputText value was set by voice (Deepgram) vs manual typing.
+  // Used to prevent voice auto-clear from erasing text the user typed manually.
+  const voiceInputRef = useRef(false);
+  const inputTextRef  = useRef('');     // mirror of inputText for use in WS callbacks
   const ttsAudioRef     = useRef<HTMLAudioElement | null>(null);
   const rafRef          = useRef<number | null>(null);
   const messagesRef     = useRef(messages);
@@ -337,6 +347,7 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
   useEffect(() => { onSongReadyRef.current    = onSongReady;    }, [onSongReady]);
   useEffect(() => { onPlayRequestRef.current  = onPlayRequest;  }, [onPlayRequest]);
   useEffect(() => { instrumentalUrlRef.current = instrumentalUrl; }, [instrumentalUrl]);
+  useEffect(() => { inputTextRef.current      = inputText;      }, [inputText]);
 
   // When audio generation completes, stop mic and speak the "ready" announcement
   const prevAudioReadyCount = useRef(0);
@@ -380,16 +391,97 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, loading]);
 
+  // ── Barge-in helpers ─────────────────────────────────────────────────────
+
+  /** Restart the MediaRecorder on the existing (still-open) Deepgram socket.
+   *  Called after TTS ends or when barge-in is detected. */
+  const resumeRecording = useCallback(() => {
+    // Always open a fresh Deepgram WebSocket — reusing the same socket after
+    // stopping MediaRecorder causes a new WebM/Opus stream to start mid-session,
+    // which Deepgram cannot handle and silently stops transcribing.
+    // We keep dgStreamRef alive (mic stays open) so startListening can reuse it
+    // without triggering another getUserMedia permission prompt.
+    dgRecorderRef.current?.stop();
+    dgRecorderRef.current = null;
+    dgSocketRef.current?.close(1000, 'resume-recording');
+    dgSocketRef.current = null;
+    void startListeningRef.current();
+  }, []);
+
+  /** Stop barge-in energy monitoring. */
+  const stopBargeIn = useCallback(() => {
+    if (bargeInRef.current) {
+      cancelAnimationFrame(bargeInRef.current.raf);
+      void bargeInRef.current.actx.close();
+      bargeInRef.current = null;
+    }
+  }, []);
+
+  /** Start monitoring mic energy during TTS so the user can barge in by speaking.
+   *  The mic stream stays open; we use a Web Audio AnalyserNode to detect voice. */
+  const startBargeIn = useCallback(() => {
+    const stream = dgStreamRef.current;
+    if (!stream || bargeInRef.current) return;
+
+    let actx: AudioContext;
+    try {
+      actx = new AudioContext();
+    } catch { return; }
+
+    const src      = actx.createMediaStreamSource(stream);
+    const analyser = actx.createAnalyser();
+    analyser.fftSize = 256;
+    src.connect(analyser);
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    let loudCount = 0;
+
+    const check = () => {
+      analyser.getByteTimeDomainData(data);
+      // Compute RMS amplitude (values are 0–255 centred at 128)
+      let sum = 0;
+      for (const v of data) sum += (v - 128) ** 2;
+      const rms = Math.sqrt(sum / data.length);
+
+      if (rms > 12) {
+        loudCount++;
+        // ~5 frames at 60fps ≈ 80 ms of sustained speech → barge-in
+        if (loudCount >= 5 && ttsPlayingRef.current) {
+          stopBargeIn();
+          ttsAudioRef.current?.pause();
+          ttsPlayingRef.current = false;
+          setSpeakingIndex(null);
+          setPlaybackTime(0);
+          if (rafRef.current) cancelAnimationFrame(rafRef.current);
+          accumulatedTranscript.current = '';
+          resumeRecording();
+          return;
+        }
+      } else {
+        loudCount = 0;
+      }
+      if (bargeInRef.current) {
+        bargeInRef.current.raf = requestAnimationFrame(check);
+      }
+    };
+
+    bargeInRef.current = { actx, raf: requestAnimationFrame(check) };
+  }, [stopBargeIn, resumeRecording]);
+
   // ── TTS ───────────────────────────────────────────────────────────────────
 
   const speakMessage = useCallback(async (msgIndex: number, text: string) => {
     if (!text.trim()) return;
 
-    // Stop anything currently playing; abort mic so it doesn't pick up TTS output
+    // Stop anything currently playing. Pause the MediaRecorder so no audio goes
+    // to Deepgram during TTS, but keep the mic stream and WebSocket alive —
+    // this lets barge-in detection work without a reconnect penalty.
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     ttsPlayingRef.current = true;
-    recognitionRef.current?.abort();
+    ttsTextRef.current = text.trim();
+    dgRecorderRef.current?.stop();
+    dgRecorderRef.current = null;
     ttsAudioRef.current?.pause();
+    startBargeIn();
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     setSpeakingIndex(null);
     setPlaybackTime(0);
@@ -427,12 +519,13 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
           const audio = new Audio(url);
           ttsAudioRef.current = audio;
           audio.onended = () => {
+            stopBargeIn();
             setSpeakingIndex(null);
             setPlaybackTime(0);
             if (rafRef.current) cancelAnimationFrame(rafRef.current);
             URL.revokeObjectURL(url);
             ttsPlayingRef.current = false;
-            if (continuousRef.current) startListeningRef.current();
+            if (continuousRef.current) resumeRecording();
           };
           await audio.play();
           setSpeakingIndex(msgIndex);
@@ -468,10 +561,11 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
         if (preferred) utt.voice = preferred;
         setSpeakingIndex(msgIndex);
         utt.onend = () => {
+          stopBargeIn();
           setSpeakingIndex(null);
           setPlaybackTime(0);
           ttsPlayingRef.current = false;
-          if (continuousRef.current) startListeningRef.current();
+          if (continuousRef.current) resumeRecording();
         };
         window.speechSynthesis.speak(utt);
       };
@@ -658,85 +752,167 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
       setLoading(false);
       setTimeout(() => inputRef.current?.focus(), 50);
     }
-  }, []); // stable — all mutable values accessed via refs
+  }, [stopBargeIn, resumeRecording]); // stable helpers injected via useCallback
 
-  // ── Continuous speech recognition ─────────────────────────────────────────
+  // ── Deepgram WebSocket speech recognition ────────────────────────────────
+  // Uses Deepgram nova-2 with smart_format + endpointing so the agent responds
+  // as soon as Deepgram detects end-of-speech (speech_final:true), rather than
+  // waiting on a fixed silence timer.
 
   const startListening = useCallback(() => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const SR = window.SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SR) return;
-    continuousRef.current = true;
+    // Guard against both OPEN and CONNECTING states — a socket in CONNECTING
+    // would pass the old OPEN-only check and create a second connection, causing
+    // both sockets to write to the shared accumulatedTranscript and duplicate text.
+    const ws = dgSocketRef.current;
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+    if (!continuousRef.current) continuousRef.current = true;
     setRecording(true);
 
-    const createAndStart = () => {
-      if (!continuousRef.current || ttsPlayingRef.current) return;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const rec = new (SR as any)() as any;
-      rec.continuous     = false;  // restart manually for broad browser support
-      rec.interimResults = true;
-      rec.lang           = 'en-US';
+    void (async () => {
+      try {
+        // 1. Get a short-lived Deepgram key from our backend (real key stays server-side)
+        const tokenRes = await fetch('/api/deepgram-token');
+        if (!tokenRes.ok) throw new Error('deepgram-token fetch failed');
+        const { key, error: tokenErr } = await tokenRes.json() as { key?: string; error?: string };
+        if (tokenErr || !key) throw new Error(tokenErr ?? 'no key');
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      rec.onresult = (e: any) => {
-        let interim = '';
-        let sessionFinal = '';
-        for (let i = e.resultIndex; i < e.results.length; i++) {
-          const r = e.results[i];
-          if (r.isFinal) sessionFinal += r[0].transcript + ' ';
-          else           interim += r[0].transcript;
-        }
+        if (!continuousRef.current || ttsPlayingRef.current) return;
 
-        // Accumulate finals across session restarts so a brief pause mid-sentence
-        // doesn't chop the utterance into separate messages.
-        if (sessionFinal.trim()) {
-          accumulatedTranscript.current = (accumulatedTranscript.current + ' ' + sessionFinal).trim();
-        }
+        // 2. Open Deepgram WebSocket
+        const params = new URLSearchParams({
+          model:            'nova-2',
+          language:         'en-US',
+          smart_format:     'true',   // auto-punctuates transcripts
+          interim_results:  'true',
+          endpointing:      '380',    // ms of silence → speech_final fires
+          no_delay:         'true',   // minimise latency on interim results
+          encoding:         'opus',
+          channels:         '1',
+        });
+        const ws = new WebSocket(
+          `wss://api.deepgram.com/v1/listen?${params}`,
+          ['token', key],
+        );
+        dgSocketRef.current = ws;
 
-        // Show accumulated + current interim so the user sees the whole sentence building
-        const display = [accumulatedTranscript.current, interim].filter(Boolean).join(' ');
-        setInputText(display);
-
-        // Reset silence timer on every speech event — only fire when the user has
-        // genuinely stopped talking for 3.5 s.
-        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-        if (accumulatedTranscript.current) {
-          const attempt = () => {
-            const toSend = accumulatedTranscript.current;
-            if (!toSend.trim()) return;
-            if (loadingRef.current) {
-              // AI is still responding — retry in 500 ms rather than discarding
-              silenceTimerRef.current = setTimeout(attempt, 500);
-              return;
+        ws.onopen = async () => {
+          try {
+            // 3. Open mic and pipe audio chunks into the WebSocket.
+            // Reuse an existing live stream (e.g. kept alive for barge-in detection)
+            // so we don't re-prompt for mic permissions on every TTS → listen cycle.
+            let stream = dgStreamRef.current;
+            if (!stream || stream.getTracks().every(t => t.readyState === 'ended')) {
+              stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+              dgStreamRef.current = stream;
             }
+
+            // Pick a supported mimeType
+            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+              ? 'audio/webm;codecs=opus'
+              : MediaRecorder.isTypeSupported('audio/webm')
+              ? 'audio/webm'
+              : '';
+            const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+            dgRecorderRef.current = recorder;
+            recorder.ondataavailable = e => {
+              if (ws.readyState === WebSocket.OPEN && e.data.size > 0) ws.send(e.data);
+            };
+            recorder.start(250); // send a chunk every 250 ms
+          } catch (micErr) {
+            console.error('[deepgram] mic access failed', micErr);
+            ws.close();
+            setRecording(false);
+            continuousRef.current = false;
+          }
+        };
+
+        ws.onmessage = e => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const msg = JSON.parse(e.data as string) as any;
+          if (msg.type !== 'Results') return;
+
+          const transcript = (msg.channel?.alternatives?.[0]?.transcript ?? '') as string;
+          const isFinal    = msg.is_final    as boolean;
+          const speechFinal = msg.speech_final as boolean;
+
+          if (isFinal && transcript.trim()) {
+            // Accumulate confirmed segments into the running transcript
+            accumulatedTranscript.current =
+              (accumulatedTranscript.current + ' ' + transcript).trim();
+          }
+
+          // Update live display — but only if the input is currently voice-driven
+          // or empty. If the user has typed manually, don't overwrite their text.
+          const interim = !isFinal ? transcript : '';
+          const display = [accumulatedTranscript.current, interim].filter(Boolean).join(' ');
+          if (display && (voiceInputRef.current || !inputTextRef.current)) {
+            setInputText(display);
+            voiceInputRef.current = true;
+          }
+
+          if (speechFinal && accumulatedTranscript.current.trim()) {
+            // Deepgram has detected end-of-utterance.
+            const toSend = accumulatedTranscript.current;
             accumulatedTranscript.current = '';
+
+            // If the user typed manually while the mic was on, don't clear their
+            // text or auto-send the voice transcript — they'll send it themselves.
+            if (!voiceInputRef.current) return;
+
+            // Before sending, check if this is just the AI's own voice bleeding
+            // into the mic (echo). Compare word overlap against current TTS text.
+            const isEcho = (() => {
+              const ttsWords  = ttsTextRef.current.toLowerCase().replace(/[^a-z0-9 ]/g, '').split(/\s+/).filter(Boolean);
+              const heardWords = toSend.toLowerCase().replace(/[^a-z0-9 ]/g, '').split(/\s+/).filter(Boolean);
+              if (ttsWords.length === 0 || heardWords.length === 0) return false;
+              const ttsSet = new Set(ttsWords);
+              const overlap = heardWords.filter(w => ttsSet.has(w)).length;
+              return overlap / heardWords.length > 0.5;
+            })();
+
             setInputText('');
-            void doSendMessage(toSend);
-          };
-          silenceTimerRef.current = setTimeout(attempt, 3500);
-        }
-      };
+            voiceInputRef.current = false;
 
-      // Restart automatically when the recognizer stops (end of utterance)
-      rec.onend = () => {
-        if (continuousRef.current) createAndStart();
-        else setRecording(false);
-      };
+            if (isEcho) return; // Discard — audio bleed from the speaker
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      rec.onerror = (e: any) => {
-        // 'no-speech' is a normal pause; 'aborted' is our intentional abort during TTS — both are expected
-        if (e.error === 'no-speech' || e.error === 'aborted') return;
+            if (loadingRef.current) {
+              // AI still responding — buffer the text and retry when it's free
+              if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+              const retry = () => {
+                if (loadingRef.current) {
+                  silenceTimerRef.current = setTimeout(retry, 500);
+                } else {
+                  silenceTimerRef.current = null;
+                  void doSendMessage(toSend);
+                }
+              };
+              silenceTimerRef.current = setTimeout(retry, 500);
+            } else {
+              void doSendMessage(toSend);
+            }
+          }
+        };
+
+        ws.onerror = () => {
+          continuousRef.current = false;
+          setRecording(false);
+        };
+
+        ws.onclose = () => {
+          // Auto-reconnect on unexpected close (e.g. network glitch), but not
+          // when we deliberately closed for TTS playback.
+          if (continuousRef.current && !ttsPlayingRef.current) {
+            void startListeningRef.current();
+          } else if (!continuousRef.current) {
+            setRecording(false);
+          }
+        };
+      } catch (err) {
+        console.error('[deepgram] startListening failed', err);
         continuousRef.current = false;
         setRecording(false);
-      };
-
-      rec.start();
-      recognitionRef.current = rec;
-    };
-
-    createAndStart();
+      }
+    })();
   }, [doSendMessage]);
 
   // Keep ref current so speakMessage (frozen closure) can always call the latest startListening
@@ -744,11 +920,17 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
 
   const stopListening = useCallback(() => {
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+    stopBargeIn();
     continuousRef.current = false;
     setRecording(false);
-    recognitionRef.current?.abort();
-    recognitionRef.current = null;
-  }, []);
+    accumulatedTranscript.current = '';
+    dgRecorderRef.current?.stop();
+    dgRecorderRef.current = null;
+    dgStreamRef.current?.getTracks().forEach(t => t.stop());
+    dgStreamRef.current = null;
+    dgSocketRef.current?.close(1000, 'stop-listening');
+    dgSocketRef.current = null;
+  }, [stopBargeIn]);
 
   stopListeningRef.current = stopListening;
 
@@ -898,7 +1080,7 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
         <textarea
           ref={inputRef}
           value={inputText}
-          onChange={e => setInputText(e.target.value)}
+          onChange={e => { setInputText(e.target.value); voiceInputRef.current = false; }}
           onKeyDown={handleKeyDown}
           placeholder={recording ? 'Listening… speak naturally, I\'ll send when you finish' : 'Type or tap the mic… (Enter to send)'}
           rows={2}
@@ -911,14 +1093,16 @@ export default function SongWizard({ onSongReady, onPlayRequest, audioReadyCount
         {speakingIndex !== null && (
           <button
             onClick={() => {
+              stopBargeIn();
               ttsAudioRef.current?.pause();
               ttsPlayingRef.current = false;
               setSpeakingIndex(null);
               setPlaybackTime(0);
               if (rafRef.current) cancelAnimationFrame(rafRef.current);
-              if (continuousRef.current) startListeningRef.current();
+              accumulatedTranscript.current = '';
+              if (continuousRef.current) resumeRecording();
             }}
-            title="Stop speaking"
+            title="Stop speaking (or just speak to interrupt)"
             className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 bg-[#f37321] hover:bg-[#da6520] text-white transition-colors"
           >
             <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">

@@ -310,8 +310,6 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
   const [activeExtraVocalId,  setActiveExtraVocalId]  = useState<string | null>(null);
   const [vocalsGo,            setVocalsGo]            = useState(false);
 
-  // Timeline editor + mix-down
-  const [mixingDown,    setMixingDown]    = useState(false);
 
   // ── Vocals recording ──────────────────────────────────────────────────────────
   const [vocalsRecording,        setVocalsRecording]        = useState(false); // mic is live
@@ -407,6 +405,7 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
     return () => { if (audioCrawlRef.current) clearInterval(audioCrawlRef.current); };
   }, [generating]);
   const [regeneratingSectionIndex, setRegeneratingSectionIndex] = useState<number | null>(null);
+  const [regeneratingTrackId, setRegeneratingTrackId] = useState<string | null>(null);
   const [confirmDeleteIndex, setConfirmDeleteIndex] = useState<number | null>(null);
   const [sectionTimings, setSectionTimings] = useState<{ startMs: number; endMs: number }[]>(
     () => initialState?.sectionTimings ?? []
@@ -724,50 +723,6 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
 
   // ── Section regeneration ──────────────────────────────────────────────────────
 
-  const handleSliceSection = (index: number, localRatio: number) => {
-    const timing = sectionTimings[index];
-    const original = song.sections[index];
-    const splitMs = timing
-      ? timing.startMs + localRatio * (timing.endMs - timing.startMs)
-      : undefined;
-
-    const sectionA: SongSection = {
-      ...original,
-      label: `${original.label} A`,
-      durationMs: timing ? Math.round(splitMs! - timing.startMs) : original.durationMs,
-    };
-    const sectionB: SongSection = {
-      ...original,
-      label: `${original.label} B`,
-      durationMs: timing ? Math.round(timing.endMs - splitMs!) : original.durationMs,
-    };
-
-    setSong(s => ({
-      ...s,
-      sections: [...s.sections.slice(0, index), sectionA, sectionB, ...s.sections.slice(index + 1)],
-    }));
-    setLockedSections(prev => {
-      const next = [...prev];
-      next.splice(index, 1, { ...original }, { ...original });
-      return next;
-    });
-    setSectionTakes(prev => {
-      const next = [...prev];
-      next.splice(index, 1, prev[index] ?? [], []);
-      return next;
-    });
-    if (timing && splitMs !== undefined) {
-      setSectionTimings(prev => {
-        const next = [...prev];
-        next.splice(index, 1,
-          { startMs: timing.startMs, endMs: Math.round(splitMs) },
-          { startMs: Math.round(splitMs), endMs: timing.endMs },
-        );
-        return next;
-      });
-    }
-  };
-
   const handleFadeOutSection = async (index: number) => {
     if (!liveInstrumentalUrl) return;
     const timing = sectionTimings[index];
@@ -787,6 +742,29 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
     ));
   };
 
+  const handleSliceSection = (index: number, sliceAtMs: number) => {
+    const timing = sectionTimings[index];
+    if (!timing) return;
+    const section = song.sections[index];
+    const leftDurMs  = Math.round(sliceAtMs - timing.startMs);
+    const rightDurMs = Math.round(timing.endMs - sliceAtMs);
+    if (leftDurMs <= 0 || rightDurMs <= 0) return;
+
+    // Split lyrics proportionally by line count
+    const lines    = section.lyrics.split('\n');
+    const splitAt  = Math.max(1, Math.round(lines.length * (leftDurMs / (leftDurMs + rightDurMs))));
+    const leftLyrics  = lines.slice(0, splitAt).join('\n');
+    const rightLyrics = lines.slice(splitAt).join('\n');
+
+    const leftSection:  typeof section = { ...section, label: section.label + ' A', lyrics: leftLyrics,  durationMs: leftDurMs  };
+    const rightSection: typeof section = { ...section, label: section.label + ' B', lyrics: rightLyrics, durationMs: rightDurMs };
+
+    const newSections = [...song.sections];
+    newSections.splice(index, 1, leftSection, rightSection);
+    setSong(prev => ({ ...prev, sections: newSections }));
+    setSectionTimings(timingsFromBars(newSections, song.tempo));
+  };
+
   const handleRegenerateSection = async (sectionIndex: number, mode: 'both' | 'vocals' | 'instrumental' = 'both') => {
     const sectionLabel = song.sections[sectionIndex].label;
     const takeNum = (sectionTakes[sectionIndex]?.length ?? 0) + 1;
@@ -801,6 +779,12 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
     };
     setSectionTakes(prev => { const next = [...prev]; next[sectionIndex] = [...(next[sectionIndex] ?? []), snap]; return next; });
     setRegeneratingSectionIndex(sectionIndex);
+    // Pin the loading animation to the specific track being regenerated.
+    // null = both tracks (unsplit or 'both' with split)
+    setRegeneratingTrackId(
+      mode === 'vocals'       && !!liveVocalsUrl ? 'vocals-primary' :
+      mode === 'instrumental' && !!liveVocalsUrl ? 'instrumental'   : null
+    );
     setError('');
     try {
       // Always cut at bar-exact positions, independent of any audio-position drift.
@@ -830,31 +814,56 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
       const newAudio = fitted.audioUrl;
       const newTs    = fitted.wordTimestamps;
 
-      // When tracks are split, route the result to the right track.
-      // vocals mode  → swap into liveVocalsUrl only (instrumental untouched)
-      // instrumental → swap into liveInstrumentalUrl only (vocals + word timestamps untouched)
-      // both / unsplit → swap into liveInstrumentalUrl (legacy mixed-track behaviour)
-      const isVocalsSwap = mode === 'vocals' && !!liveVocalsUrl;
-      const isInstSwap   = mode === 'instrumental' && !!liveVocalsUrl;
-      const swapSourceUrl = isVocalsSwap ? liveVocalsUrl! : liveInstrumentalUrl;
-      // Word timestamps belong to the vocal content; only pass them when swapping vocals.
-      const swapSourceTs  = isVocalsSwap ? liveWordTimestamps : (isInstSwap ? [] : liveWordTimestamps);
+      // Route the new section audio to the right track(s).
+      // both + split  → split the new section, swap inst stem into instrumental, vocal stem into vocals
+      // vocals + split → swap directly into liveVocalsUrl
+      // instrumental + split → swap directly into liveInstrumentalUrl
+      // both / unsplit → swap mixed audio into liveInstrumentalUrl
+      const isBothSplit  = mode === 'both'         && !!liveVocalsUrl;
+      const isVocalsSwap = mode === 'vocals'        && !!liveVocalsUrl;
+      const isInstSwap   = mode === 'instrumental'  && !!liveVocalsUrl;
 
-      let finalInstUrl  = liveInstrumentalUrl;
-      let finalVocUrl   = liveVocalsUrl;
-      let finalTs       = liveWordTimestamps;
+      let finalInstUrl = liveInstrumentalUrl;
+      let finalVocUrl  = liveVocalsUrl;
+      let finalTs      = liveWordTimestamps;
 
       const startMs = timing?.startMs;
       const endMs   = timing?.endMs;
       if (startMs !== undefined && endMs !== undefined) {
         const { swapSection } = await import('@/lib/audio/splice');
-        const r = await swapSection(swapSourceUrl, swapSourceTs, startMs, endMs, newAudio, newTs);
-        if (isVocalsSwap) {
+
+        if (isBothSplit) {
+          // Split the new section into stems silently (no modal), then swap each into its full track.
+          const audioDataUrl = newAudio.startsWith('blob:') ? await blobUrlToDataUrl(newAudio) : newAudio;
+          const splitRes = await fetch('/api/split', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ audioUrl: audioDataUrl }),
+          });
+          if (!splitRes.ok) throw new Error(await splitRes.text());
+          const { vocals: vocData, instrumental: instData } = await splitRes.json() as { vocals: string; instrumental: string };
+          const [rawInstSection, rawVocSection] = await Promise.all([toBlobUrl(instData), toBlobUrl(vocData)]);
+          const { fitAudioToMs: fit2 } = await import('@/lib/audio/splice');
+          const [instFitted, vocFitted] = await Promise.all([
+            fit2(rawInstSection, [], sectionDurMs),
+            fit2(rawVocSection, newTs, sectionDurMs),
+          ]);
+          const [instR, vocR] = await Promise.all([
+            swapSection(liveInstrumentalUrl, [], startMs, endMs, instFitted.audioUrl, []),
+            swapSection(liveVocalsUrl!, liveWordTimestamps, startMs, endMs, vocFitted.audioUrl, vocFitted.wordTimestamps),
+          ]);
+          finalInstUrl = instR.audioUrl;
+          finalVocUrl  = vocR.audioUrl;
+          finalTs      = vocR.wordTimestamps;
+        } else if (isVocalsSwap) {
+          const r = await swapSection(liveVocalsUrl!, liveWordTimestamps, startMs, endMs, newAudio, newTs);
           finalVocUrl = r.audioUrl;
           finalTs     = r.wordTimestamps;
         } else {
+          const srcTs = isInstSwap ? [] : liveWordTimestamps;
+          const r = await swapSection(liveInstrumentalUrl, srcTs, startMs, endMs, newAudio, newTs);
           finalInstUrl = r.audioUrl;
-          if (!isInstSwap) finalTs = r.wordTimestamps; // unsplit: timestamps travel with the mix
+          if (!isInstSwap) finalTs = r.wordTimestamps;
         }
       }
 
@@ -886,6 +895,7 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
       setSectionTakes(prev => { const next = [...prev]; next[sectionIndex] = (next[sectionIndex] ?? []).filter(t => t.id !== snap.id); return next; });
     } finally {
       setRegeneratingSectionIndex(null);
+      setRegeneratingTrackId(null);
     }
   };
 
@@ -1150,28 +1160,6 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
     }
   };
 
-  /** Mixes all tracks down to a single WAV and triggers a browser download */
-  const handleMixDown = async () => {
-    const allUrls = [
-      liveInstrumentalUrl,
-      liveVocalsUrl,
-      ...extraVocalTracks.map(t => t.url),
-    ].filter(Boolean) as string[];
-    if (allUrls.length === 0) return;
-    setMixingDown(true);
-    try {
-      const mixUrl = await mixTracks(allUrls);
-      const a = document.createElement('a');
-      a.href = mixUrl;
-      a.download = `${song.title.replace(/[^a-z0-9 ]/gi, '').trim() || 'mix'} - Mix.wav`;
-      a.click();
-      URL.revokeObjectURL(mixUrl);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Mix-down failed');
-    } finally {
-      setMixingDown(false);
-    }
-  };
 
   // ── Instrument stem separation ───────────────────────────────────────────────
 
@@ -1722,25 +1710,12 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
                 )}
               </div>
             ))}
-            {/* Spacer + Mix Down — far right */}
+            {/* Spacer + stems badge — far right */}
             <div className="flex-1" />
             {separationMethod && (
               <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-[#e8f5e9] text-[#2e7d32]">
                 ElevenLabs stems
               </span>
-            )}
-            {liveInstrumentalUrl && (
-              <button
-                onClick={handleMixDown}
-                disabled={mixingDown}
-                className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium border border-[#e0e0e0] text-[#929292] hover:text-[#f37321] hover:border-[#f37321] transition-colors disabled:opacity-40"
-                title="Mix all tracks down to a WAV file"
-              >
-                <svg className="w-3 h-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                  <path d="M8 2v8M5 7l3 3 3-3M2 13h12"/>
-                </svg>
-                {mixingDown ? 'Mixing…' : 'Mix Down'}
-              </button>
             )}
           </div>
 
@@ -1792,8 +1767,9 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
               onTimelineApply={handleTimelineApply}
               onRegenerateSection={(index, mode) => void handleRegenerateSection(index, mode)}
               regeneratingSectionIndex={regeneratingSectionIndex}
-              onSliceSection={handleSliceSection}
+              regeneratingTrackId={regeneratingTrackId}
               onFadeOutSection={index => void handleFadeOutSection(index)}
+              onSliceSection={handleSliceSection}
               sectionTimings={sectionTimings}
             />
           )}

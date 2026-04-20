@@ -48,8 +48,10 @@ interface Props {
   onTimelineApply?: (updated: { id: string; url: string; timestamps?: WordTimestamp[] }[]) => void;
   onRegenerateSection?: (index: number, mode: 'both' | 'vocals' | 'instrumental') => void;
   regeneratingSectionIndex?: number | null;
-  onSliceSection?: (index: number, localRatio: number) => void;
+  /** Which track is regenerating. null/undefined = all tracks (unsplit 'both'). */
+  regeneratingTrackId?: string | null;
   onFadeOutSection?: (index: number) => void;
+  onSliceSection?: (index: number, sliceAtMs: number) => void;
   sectionTimings?: { startMs: number; endMs: number }[];
 }
 
@@ -74,8 +76,9 @@ export default function AudioPlayer({
   onTimelineApply,
   onRegenerateSection,
   regeneratingSectionIndex,
-  onSliceSection,
+  regeneratingTrackId,
   onFadeOutSection,
+  onSliceSection,
   sectionTimings,
 }: Props) {
   const audioRef  = useRef<HTMLAudioElement>(null);
@@ -98,6 +101,8 @@ export default function AudioPlayer({
   const [audioDurationMs, setAudioDurationMs] = useState(0);
   const [beatPhaseMs,  setBeatPhaseMs]  = useState<number | null>(null);
   const [activeSectionIndex, setActiveSectionIndex] = useState<number | null>(null);
+  // null = playback-driven (all tracks follow); string = user clicked a specific track
+  const [activeTrackId, setActiveTrackId] = useState<string | null>(null);
   const [instVolume,   setInstVolume]   = useState(0.75);
   const [vocalsVolume, setVocalsVolume] = useState(0.9);
   const [drumVolume,    setDrumVolume]    = useState(0.8);
@@ -141,6 +146,7 @@ export default function AudioPlayer({
   const vocalsVolumeRef            = useRef(vocalsVolume);
   const activeExtraVocalIdRef      = useRef(activeExtraVocalId);
   const rafRef                     = useRef<number | null>(null);
+  const playStartRef               = useRef<{ wallClock: number; audioTime: number } | null>(null);
 
   const onPlayStateChangeRef = useRef(onPlayStateChange);
   useEffect(() => { onPlayStateChangeRef.current = onPlayStateChange; }, [onPlayStateChange]);
@@ -185,11 +191,30 @@ export default function AudioPlayer({
     const tick = () => {
       const audio = audioRef.current;
       if (audio && !audio.paused && isFinite(audio.duration) && audio.duration > 0) {
-        updateProgress(audio.currentTime, audio.duration);
+        // Wall-clock compensation: Chrome freezes currentTime for 1-3s after play().
+        // Use performance.now() to estimate real position during that startup window.
+        let ct = audio.currentTime;
+        const ps = playStartRef.current;
+        if (ps) {
+          const wallElapsed = (performance.now() - ps.wallClock) / 1000;
+          const estimated = ps.audioTime + wallElapsed;
+          if (estimated > ct) ct = estimated;
+          // Once actual currentTime catches up, stop compensating
+          if (audio.currentTime >= estimated) playStartRef.current = null;
+        }
+        updateProgress(ct, audio.duration);
       } else {
         const voc = vocalsRef.current;
         if (voc && !voc.paused && isFinite(voc.duration) && voc.duration > 0) {
-          updateProgress(voc.currentTime, voc.duration);
+          let ct = voc.currentTime;
+          const ps = playStartRef.current;
+          if (ps) {
+            const wallElapsed = (performance.now() - ps.wallClock) / 1000;
+            const estimated = ps.audioTime + wallElapsed;
+            if (estimated > ct) ct = estimated;
+            if (voc.currentTime >= estimated) playStartRef.current = null;
+          }
+          updateProgress(ct, voc.duration);
         }
       }
       rafRef.current = requestAnimationFrame(tick);
@@ -363,11 +388,12 @@ export default function AudioPlayer({
     setCurrentTimeMs(0);
   }, []);
 
-  const handleSectionClick = useCallback((index: number) => {
-    setActiveSectionIndex(prev => prev === index ? null : index);
+  const handleSectionClick = useCallback((index: number, trackId?: string) => {
+    setActiveSectionIndex(prev => prev === index && activeTrackId === (trackId ?? null) ? null : index);
+    setActiveTrackId(trackId ?? null);
     const marker = sectionMarkersRef.current[index];
     if (marker) seek(marker.ratio);
-  }, [seek]);
+  }, [seek, activeTrackId]);
 
   // ── Playback controls ─────────────────────────────────────────────────────────
 
@@ -396,6 +422,7 @@ export default function AudioPlayer({
       voc?.pause();
       stemEls.forEach(el => el.pause());
       extraEls.forEach(el => el.pause());
+      playStartRef.current = null;
       setPlaying(false);
       setInstSolo(false);
       setVocalsSolo(false);
@@ -410,19 +437,27 @@ export default function AudioPlayer({
       }
       stemEls.forEach(el => { el.currentTime = isFinite(el.duration) ? pos * (el.duration / (audio.duration || 1)) : 0; });
       extraEls.forEach(el => { if (isFinite(el.duration)) el.currentTime = pos * (el.duration / (audio.duration || 1)); });
-      const plays: Promise<void>[] = [audio.play()];
-      if (voc) plays.push(voc.play());
-      stemEls.forEach(el => plays.push(el.play()));
-      extraEls.forEach(el => plays.push(el.play()));
-      await Promise.all(plays);
+      // Snapshot wall-clock + audioTime so RAF can compensate for Chrome's
+      // currentTime startup freeze (can last 1-3s after play() is called).
+      playStartRef.current = { wallClock: performance.now(), audioTime: audio.currentTime };
+      // Start RAF immediately — don't await play() promises, which can stall
+      // for seconds on large WAV blobs while the audio is already running.
+      const playPromises = [audio.play()];
+      if (voc) playPromises.push(voc.play());
+      stemEls.forEach(el => playPromises.push(el.play()));
+      extraEls.forEach(el => playPromises.push(el.play()));
       setPlaying(true);
       setInstSolo(false);
       setVocalsSolo(false);
+      // Catch play errors (e.g. autoplay blocked) after the fact
+      Promise.all(playPromises).catch(err => {
+        if (err?.name !== 'AbortError') { audio.pause(); setPlaying(false); }
+      });
     }
   }, [playing, onActiveSectionChange]);
 
   /** Solo the instrumental track (stops vocal if it was soloing). */
-  const toggleInst = useCallback(async () => {
+  const toggleInst = useCallback(() => {
     const audio = audioRef.current;
     const voc   = vocalsRef.current;
     if (!audio) return;
@@ -432,20 +467,22 @@ export default function AudioPlayer({
       setPlaying(false); setVocalsSolo(false);
       lastNotifiedSectionRef.current = null; onActiveSectionChange?.(null);
       audio.volume = instVolumeRef.current;
-      await audio.play();
       setInstSolo(true);
+      playStartRef.current = { wallClock: performance.now(), audioTime: audio.currentTime };
+      audio.play().catch(err => { if (err?.name !== 'AbortError') { setInstSolo(false); playStartRef.current = null; } });
     } else if (instSolo) {
-      audio.pause(); setInstSolo(false);
+      audio.pause(); setInstSolo(false); playStartRef.current = null;
     } else {
       voc?.pause(); setVocalsSolo(false);
       audio.volume = instVolumeRef.current;
-      await audio.play();
       setInstSolo(true);
+      playStartRef.current = { wallClock: performance.now(), audioTime: audio.currentTime };
+      audio.play().catch(err => { if (err?.name !== 'AbortError') { setInstSolo(false); playStartRef.current = null; } });
     }
   }, [playing, instSolo, onActiveSectionChange]);
 
   /** Solo the vocals track (stops instrumental if it was soloing). */
-  const toggleVocals = useCallback(async () => {
+  const toggleVocals = useCallback(() => {
     const audio = audioRef.current;
     const voc   = vocalsRef.current;
     if (!voc) return;
@@ -455,15 +492,17 @@ export default function AudioPlayer({
       setPlaying(false); setInstSolo(false);
       lastNotifiedSectionRef.current = null; onActiveSectionChange?.(null);
       voc.volume = vocalsVolumeRef.current;
-      await voc.play();
       setVocalsSolo(true);
+      playStartRef.current = { wallClock: performance.now(), audioTime: voc.currentTime };
+      voc.play().catch(err => { if (err?.name !== 'AbortError') { setVocalsSolo(false); playStartRef.current = null; } });
     } else if (vocalsSolo) {
-      voc.pause(); setVocalsSolo(false);
+      voc.pause(); setVocalsSolo(false); playStartRef.current = null;
     } else {
       audio?.pause(); setInstSolo(false);
       voc.volume = vocalsVolumeRef.current;
-      await voc.play();
       setVocalsSolo(true);
+      playStartRef.current = { wallClock: performance.now(), audioTime: voc.currentTime };
+      voc.play().catch(err => { if (err?.name !== 'AbortError') { setVocalsSolo(false); playStartRef.current = null; } });
     }
   }, [playing, vocalsSolo, onActiveSectionChange]);
 
@@ -482,6 +521,7 @@ export default function AudioPlayer({
       if (lastNotifiedSectionRef.current !== newIdx) {
         lastNotifiedSectionRef.current = newIdx;
         setActiveSectionIndex(newIdx);
+        setActiveTrackId(null); // playback-driven: all tracks follow
         onActiveSectionChange?.(newIdx);
       }
     }
@@ -697,24 +737,69 @@ export default function AudioPlayer({
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  // ── Shared mute helper ───────────────────────────────────────────────────────
+  const applyMutesNow = async (url: string, tId: string) => {
+    const regions = mutedRegions.filter(m => m.trackId === tId);
+    if (regions.length === 0) return url;
+    const { silenceAudioRegion } = await import('@/lib/audio/splice');
+    const ab  = await fetch(url).then(r => r.arrayBuffer());
+    const ctx = new AudioContext();
+    const buf = await ctx.decodeAudioData(ab);
+    await ctx.close();
+    const durMs = buf.duration * 1000;
+    let out = url;
+    for (const m of regions) {
+      const r = await silenceAudioRegion(out, [], m.startRatio * durMs, m.endRatio * durMs);
+      out = r.audioUrl;
+    }
+    return out;
+  };
+
+  const triggerDownload = (url: string, filename: string) => {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+  };
+
+  const handleDownloadTrack = async (url: string, trackId: string, filename: string) => {
+    const out = await applyMutesNow(url, trackId);
+    triggerDownload(out, filename);
+  };
+
+  // ── Clip at playhead ─────────────────────────────────────────────────────────
+  const handleClipAtPlayhead = () => {
+    if (activeSectionIndex === null || activeSectionIndex === undefined) return;
+    if (!sectionTimings?.[activeSectionIndex]) return;
+    const timing = sectionTimings[activeSectionIndex];
+    const beatMs  = 60000 / tempo;
+    const phase   = beatPhaseMs ?? 0;
+    const snappedMs = phase + Math.round((currentTimeMs - phase) / beatMs) * beatMs;
+    // Must land strictly inside the section (not at its very edges)
+    if (snappedMs <= timing.startMs || snappedMs >= timing.endMs) return;
+    onSliceSection?.(activeSectionIndex, snappedMs);
+  };
+
   // ── Mix and save ──────────────────────────────────────────────────────────────
   const mixAndSave = async () => {
     setMixing(true);
     setMixUrl(null);
     try {
+
       const tracks: { url: string; volume: number }[] = [];
       if (instrumentStems) {
         tracks.push({ url: instrumentStems.drums, volume: drumVolume });
         tracks.push({ url: instrumentStems.bass,  volume: bassVolume  });
         tracks.push({ url: instrumentStems.other, volume: otherVolume });
       } else {
-        tracks.push({ url: currentInstrumentalUrl, volume: instVolume });
+        tracks.push({ url: await applyMutesNow(currentInstrumentalUrl, 'instrumental'), volume: instVolume });
       }
       if (hasTwoTracks) {
-        tracks.push({ url: currentVocalsUrl, volume: vocalsVolume });
+        tracks.push({ url: await applyMutesNow(currentVocalsUrl, 'vocals-primary'), volume: vocalsVolume });
       }
       const url = await mixTracksWithVolumes(tracks);
       setMixUrl(url);
+      triggerDownload(url, `${title}-mix.wav`);
     } finally {
       setMixing(false);
     }
@@ -726,38 +811,119 @@ export default function AudioPlayer({
       <div className="rounded-lg border border-[#e9e9e9] bg-white p-4 flex flex-col gap-4 shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
 
         {/* Transport header */}
-        <div className="flex items-center gap-4">
-          {/* Rewind */}
-          <button
-            onClick={rewind}
-            className="w-8 h-8 rounded-full bg-[#e9e9e9] hover:bg-[#d4d4d4] flex items-center justify-center text-[#676767] transition-colors flex-shrink-0"
-            aria-label="Rewind to start"
-          >
-            <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
-              <path d="M6 6h2v12H6zm3.5 6 8.5 6V6z" />
-            </svg>
-          </button>
-
-          {/* Play/Pause */}
-          <button
-            onClick={toggle}
-            className="w-10 h-10 rounded-full bg-[#f37321] hover:bg-[#da6520] flex items-center justify-center text-white transition-colors flex-shrink-0 shadow-[0_2px_6px_rgba(243,115,33,0.4)]"
-            aria-label={playing ? 'Pause' : 'Play all'}
-          >
-            {playing ? (
-              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                <rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" />
+        <div className="flex items-center gap-3">
+          {/* Left: rewind + play */}
+          <div className="flex items-center gap-3 flex-shrink-0">
+            <button
+              onClick={rewind}
+              className="w-8 h-8 rounded-full bg-[#e9e9e9] hover:bg-[#d4d4d4] flex items-center justify-center text-[#676767] transition-colors"
+              aria-label="Rewind to start"
+            >
+              <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M6 6h2v12H6zm3.5 6 8.5 6V6z" />
               </svg>
-            ) : (
-              <svg className="w-4 h-4 ml-0.5" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M8 5v14l11-7z" />
-              </svg>
-            )}
-          </button>
+            </button>
+            <button
+              onClick={toggle}
+              className="w-10 h-10 rounded-full bg-[#f37321] hover:bg-[#da6520] flex items-center justify-center text-white transition-colors flex-shrink-0 shadow-[0_2px_6px_rgba(243,115,33,0.4)]"
+              aria-label={playing ? 'Pause' : 'Play all'}
+            >
+              {playing ? (
+                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                  <rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" />
+                </svg>
+              ) : (
+                <svg className="w-4 h-4 ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M8 5v14l11-7z" />
+                </svg>
+              )}
+            </button>
+          </div>
 
-          <span className="text-sm font-semibold text-[#3b3b3b] truncate flex-1">{title}</span>
+          {/* Center: edit action buttons */}
+          <div className="flex-1 flex justify-center">
+            <div className="flex items-center gap-1.5 flex-wrap justify-center">
+              {/* Clip at Playhead */}
+              {onSliceSection && sectionMarkers.length > 1 && (
+                <button
+                  onClick={handleClipAtPlayhead}
+                  className="px-2.5 py-1 text-xs border border-[#e9e9e9] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] rounded font-medium transition-colors"
+                >✂ Clip at Playhead</button>
+              )}
+              {onSliceSection && sectionMarkers.length > 1 && (editHistory.length > 0 || editFuture.length > 0 || clipboard || regionSel) && (
+                <div className="w-px h-4 bg-[#e9e9e9] mx-0.5" />
+              )}
+              {/* Undo / Redo */}
+              {(editHistory.length > 0 || editFuture.length > 0) && (<>
+                <button
+                  disabled={editHistory.length === 0}
+                  onClick={handleUndo}
+                  title="Undo (⌘Z)"
+                  className="px-2.5 py-1 text-xs border border-[#e9e9e9] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] rounded font-medium disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                >↩ Undo</button>
+                <button
+                  disabled={editFuture.length === 0}
+                  onClick={handleRedo}
+                  title="Redo (⌘⇧Z)"
+                  className="px-2.5 py-1 text-xs border border-[#e9e9e9] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] rounded font-medium disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                >↪ Redo</button>
+              </>)}
+              {/* Paste */}
+              {clipboard && (<>
+                <div className="w-px h-4 bg-[#e9e9e9] mx-0.5" />
+                <button
+                  disabled={applyingRegion}
+                  onClick={() => void handlePaste()}
+                  title="Paste at playhead (⌘V)"
+                  className="px-2.5 py-1 text-xs border border-[#e9e9e9] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] rounded font-medium disabled:opacity-40 transition-colors"
+                >{applyingRegion ? 'Pasting…' : '⎘ Paste at playhead'}</button>
+                <button
+                  onClick={() => setClipboard(null)}
+                  title="Clear clipboard"
+                  className="px-1.5 py-1 text-[10px] text-[#bdbdbd] hover:text-[#929292] font-medium"
+                >clear</button>
+              </>)}
+              {/* Region actions */}
+              {regionSel && (() => {
+                const selOverlapsMuted = mutedRegions.some(m =>
+                  m.trackId === regionSel.trackId &&
+                  m.startRatio < regionSel.endRatio &&
+                  m.endRatio   > regionSel.startRatio,
+                );
+                return (<>
+                  <div className="w-px h-4 bg-[#e9e9e9] mx-0.5" />
+                  <span className="text-[11px] text-[#929292]">Selection:</span>
+                  <button
+                    disabled={applyingRegion}
+                    onClick={() => void handleCopy()}
+                    title="Copy selection (⌘C)"
+                    className="px-2.5 py-1 text-xs border border-[#e9e9e9] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] rounded font-medium disabled:opacity-40 transition-colors"
+                  >Copy</button>
+                  <button
+                    disabled={applyingRegion}
+                    onClick={() => void handleRegionApply('cut')}
+                    className="px-2.5 py-1 text-xs border border-[#e9e9e9] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] rounded font-medium disabled:opacity-40 transition-colors"
+                  >Cut</button>
+                  <button
+                    onClick={handleMute}
+                    className="px-2.5 py-1 text-xs border border-[#e9e9e9] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] rounded font-medium transition-colors"
+                  >Mute</button>
+                  {selOverlapsMuted && (
+                    <button
+                      onClick={handleUnmute}
+                      className="px-2.5 py-1 text-xs border border-[#e9e9e9] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] rounded font-medium transition-colors"
+                    >Unmute</button>
+                  )}
+                  <button
+                    onClick={() => setRegionSel(null)}
+                    className="px-1.5 py-1 text-xs text-[#929292] hover:text-[#3b3b3b] font-medium"
+                  >✕</button>
+                </>);
+              })()}
+            </div>
+          </div>
 
-          {/* Zoom controls */}
+          {/* Right: zoom controls */}
           <div className="flex items-center gap-1 flex-shrink-0">
             <button
               onClick={() => setWaveformZoom(z => Math.max(0.5, parseFloat((z - 0.5).toFixed(1))))}
@@ -773,7 +939,6 @@ export default function AudioPlayer({
               title="Zoom in"
             >+</button>
           </div>
-
         </div>
 
         {/* ── All tracks in a single scrollable column ── */}
@@ -837,8 +1002,7 @@ export default function AudioPlayer({
                           onRegenerate={onRegenerateVocals}
                           regenerating={regeneratingVocals}
                           onDelete={onDeletePrimaryVocals}
-                          downloadUrl={currentVocalsUrl}
-                          downloadFilename={`${title}-vocals.wav`}
+                          onDownload={() => handleDownloadTrack(currentVocalsUrl, 'vocals-primary', `${title}-vocals.wav`)}
                         >
                           {vocalsRecordingStream ? (
                             <LiveRecordingWaveform stream={vocalsRecordingStream} progress={progress} />
@@ -849,14 +1013,16 @@ export default function AudioPlayer({
                               progress={vocIsPlaying ? progress : 0}
                               onSeek={seek}
                               activeSectionIndex={activeSectionIndex}
-                              onSectionClick={handleSectionClick}
+                              activeTrackId={activeTrackId}
+                              onSectionClick={i => handleSectionClick(i, 'vocals-primary')}
                               onRegionSelect={(s, e) => setRegionSel({ trackId: 'vocals-primary', startRatio: s, endRatio: e })}
                               selectionRegion={regionSel?.trackId === 'vocals-primary' ? regionSel : null}
                               mutedRegions={mutedRegions.filter(m => m.trackId === 'vocals-primary')}
                               onRegenerateSection={onRegenerateSection}
                               regenMode="vocals"
                               regeneratingSectionIndex={regeneratingSectionIndex}
-                              onSliceSection={onSliceSection}
+                              regeneratingTrackId={regeneratingTrackId}
+                              trackId="vocals-primary"
                             />
                           )}
                         </TrackRow>
@@ -872,8 +1038,7 @@ export default function AudioPlayer({
                           onVolumeChange={setInstVolume}
                           onRegenerate={onRegenerateInstrumental}
                           regenerating={regeneratingInstrumental}
-                          downloadUrl={currentInstrumentalUrl}
-                          downloadFilename={`${title}-instrumental.wav`}
+                          onDownload={() => handleDownloadTrack(currentInstrumentalUrl, 'instrumental', `${title}-instrumental.wav`)}
                         >
                           <SectionedWaveform
                             audioUrl={currentInstrumentalUrl}
@@ -881,7 +1046,8 @@ export default function AudioPlayer({
                             progress={instIsPlaying ? progress : 0}
                             onSeek={seek}
                             activeSectionIndex={activeSectionIndex}
-                            onSectionClick={handleSectionClick}
+                            activeTrackId={activeTrackId}
+                            onSectionClick={i => handleSectionClick(i, 'instrumental')}
                             onDurationReady={handleDurationReady}
                             onBeatPhaseReady={handleBeatPhaseReady}
                             tempo={tempo}
@@ -891,7 +1057,8 @@ export default function AudioPlayer({
                             onRegenerateSection={onRegenerateSection}
                             regenMode="instrumental"
                             regeneratingSectionIndex={regeneratingSectionIndex}
-                            onSliceSection={onSliceSection}
+                            regeneratingTrackId={regeneratingTrackId}
+                            trackId="instrumental"
                             onFadeOutSection={onFadeOutSection}
                           />
                         </TrackRow>
@@ -943,20 +1110,11 @@ export default function AudioPlayer({
                           mutedRegions={mutedRegions.filter(m => m.trackId === 'instrumental')}
                           onRegenerateSection={onRegenerateSection}
                           regeneratingSectionIndex={regeneratingSectionIndex}
-                          onSliceSection={onSliceSection}
+                          regeneratingTrackId={regeneratingTrackId}
+                          trackId="instrumental"
                           onFadeOutSection={onFadeOutSection}
                         />
                       </div>
-                      <a
-                        href={currentInstrumentalUrl}
-                        download={`${title}.wav`}
-                        title="Download"
-                        className="w-6 h-6 flex items-center justify-center rounded text-[#bdbdbd] hover:text-[#f37321] transition-colors flex-shrink-0"
-                      >
-                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                        </svg>
-                      </a>
                     </div>
                   );
                 })()}
@@ -995,98 +1153,16 @@ export default function AudioPlayer({
                     {separatingInstruments ? 'Separating…' : instrumentStems ? 'Re-separate instruments' : 'Separate instruments'}
                   </button>
                 )}
-                {mixUrl && (
-                  <a
-                    href={mixUrl}
-                    download={`${title}-mix.wav`}
-                    className="text-xs text-[#f37321] hover:text-[#da6520] font-semibold transition-colors"
-                  >
-                    ↓ Download Mix
-                  </a>
-                )}
-                {instrumentStems && (drumVolume !== 0.8 || bassVolume !== 0.8 || otherVolume !== 0.8 || (hasTwoTracks && vocalsVolume !== 0.9)) && (
-                  <button
-                    onClick={mixAndSave}
-                    disabled={mixing}
-                    className="px-4 py-1.5 rounded-lg border border-[#bdbdbd] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] disabled:opacity-40 disabled:cursor-not-allowed text-sm font-semibold transition-colors"
-                  >
-                    {mixing ? 'Mixing…' : 'Mix and Save Track'}
-                  </button>
-                )}
+                <button
+                  onClick={mixAndSave}
+                  disabled={mixing}
+                  className="px-4 py-1.5 rounded-lg border border-[#bdbdbd] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] disabled:opacity-40 disabled:cursor-not-allowed text-sm font-semibold transition-colors"
+                >
+                  {mixing ? 'Mixing…' : 'Mix and Save'}
+                </button>
               </div>
             </div>
         </>
-
-        {/* Edit action bar — visible whenever there is history, a clipboard, or an active selection */}
-        {(editHistory.length > 0 || editFuture.length > 0 || clipboard || regionSel) && (
-          <div className="flex items-center gap-1.5 bg-[#fff8f3] border border-[#ffd5b8] rounded-lg px-3 py-2 -mt-2 flex-wrap">
-            {/* Undo / Redo */}
-            <button
-              disabled={editHistory.length === 0}
-              onClick={handleUndo}
-              title="Undo (⌘Z)"
-              className="px-2.5 py-1 text-xs bg-white border border-[#e9e9e9] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] rounded font-medium disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-            >↩ Undo</button>
-            <button
-              disabled={editFuture.length === 0}
-              onClick={handleRedo}
-              title="Redo (⌘⇧Z)"
-              className="px-2.5 py-1 text-xs bg-white border border-[#e9e9e9] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] rounded font-medium disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-            >↪ Redo</button>
-            {/* Paste — shown when clipboard has content */}
-            {clipboard && (<>
-              <div className="w-px h-4 bg-[#ffd5b8] mx-0.5" />
-              <button
-                disabled={applyingRegion}
-                onClick={() => void handlePaste()}
-                title="Paste at playhead (⌘V)"
-                className="px-2.5 py-1 text-xs bg-white border border-[#e9e9e9] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] rounded font-medium disabled:opacity-40 transition-colors"
-              >{applyingRegion ? 'Pasting…' : '⎘ Paste at playhead'}</button>
-              <button
-                onClick={() => setClipboard(null)}
-                title="Clear clipboard"
-                className="px-1.5 py-1 text-[10px] text-[#bdbdbd] hover:text-[#929292] font-medium"
-              >clear</button>
-            </>)}
-            {/* Region actions — only when a selection is active */}
-            {regionSel && (() => {
-              const selOverlapsMuted = mutedRegions.some(m =>
-                m.trackId === regionSel.trackId &&
-                m.startRatio < regionSel.endRatio &&
-                m.endRatio   > regionSel.startRatio,
-              );
-              return (<>
-                <div className="w-px h-4 bg-[#ffd5b8] mx-0.5" />
-                <span className="text-[11px] text-[#929292]">Selection:</span>
-                <button
-                  disabled={applyingRegion}
-                  onClick={() => void handleCopy()}
-                  title="Copy selection (⌘C)"
-                  className="px-2.5 py-1 text-xs bg-white border border-[#e9e9e9] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] rounded font-medium disabled:opacity-40 transition-colors"
-                >Copy</button>
-                <button
-                  disabled={applyingRegion}
-                  onClick={() => void handleRegionApply('cut')}
-                  className="px-2.5 py-1 text-xs bg-white border border-[#e9e9e9] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] rounded font-medium disabled:opacity-40 transition-colors"
-                >Cut</button>
-                <button
-                  onClick={handleMute}
-                  className="px-2.5 py-1 text-xs bg-white border border-[#e9e9e9] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] rounded font-medium transition-colors"
-                >Mute</button>
-                {selOverlapsMuted && (
-                  <button
-                    onClick={handleUnmute}
-                    className="px-2.5 py-1 text-xs bg-white border border-[#e9e9e9] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] rounded font-medium transition-colors"
-                  >Unmute</button>
-                )}
-                <button
-                  onClick={() => setRegionSel(null)}
-                  className="px-1.5 py-1 text-xs text-[#929292] hover:text-[#3b3b3b] font-medium ml-auto"
-                >✕</button>
-              </>);
-            })()}
-          </div>
-        )}
 
         {/* Hidden audio elements — use playback URLs so muted regions are silenced */}
         <audio
@@ -1130,7 +1206,8 @@ function SectionedWaveform({
   audioUrl, sectionMarkers, progress, onSeek, activeSectionIndex,
   onSectionClick, onDurationReady, onBeatPhaseReady, tempo,
   onRegionSelect, selectionRegion, mutedRegions,
-  onRegenerateSection, regenMode, regeneratingSectionIndex, onSliceSection, onFadeOutSection,
+  onRegenerateSection, regenMode, regeneratingSectionIndex, regeneratingTrackId,
+  onFadeOutSection, trackId, activeTrackId,
 }: {
   audioUrl: string;
   sectionMarkers: { ratio: number; label: string }[];
@@ -1151,8 +1228,10 @@ function SectionedWaveform({
   /** When set, skip the popover and fire onRegenerateSection with this mode directly. */
   regenMode?: 'both' | 'vocals' | 'instrumental';
   regeneratingSectionIndex?: number | null;
-  onSliceSection?: (index: number, localRatio: number) => void;
+  regeneratingTrackId?: string | null;
   onFadeOutSection?: (index: number) => void;
+  trackId?: string;
+  activeTrackId?: string | null;
 }) {
   const [peaks,            setPeaks]            = useState<number[]>([]);
   const [loading,          setLoading]          = useState(true);
@@ -1162,11 +1241,6 @@ function SectionedWaveform({
   const [liveSel, setLiveSel] = useState<{ startRatio: number; endRatio: number } | null>(null);
   /** Index of the section whose regen popover is open, or null. */
   const [regenPopoverIndex, setRegenPopoverIndex] = useState<number | null>(null);
-  /** Index of section currently in slice mode, or null. */
-  const [slicingIndex, setSlicingIndex] = useState<number | null>(null);
-  /** Cursor position (0–1 local ratio) while hovering in slice mode. */
-  const [sliceHover, setSliceHover] = useState<number | null>(null);
-
   const containerRef = useRef<HTMLDivElement>(null);
   const selDragRef   = useRef<{ startX: number; startRatio: number } | null>(null);
 
@@ -1205,10 +1279,10 @@ function SectionedWaveform({
     return closestRatio;
   };
 
-  // Close slice mode and regen popover on Escape
+  // Close regen popover on Escape
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { setSlicingIndex(null); setSliceHover(null); setRegenPopoverIndex(null); }
+      if (e.key === 'Escape') { setRegenPopoverIndex(null); }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
@@ -1248,7 +1322,22 @@ function SectionedWaveform({
   }, [audioUrl]);
 
   if (loading) {
-    return <div className="h-[68px] flex items-center justify-center text-xs text-[#929292]">Loading waveform…</div>;
+    // Show a placeholder bar with a live playhead so the animation isn't
+    // frozen while peak decoding is in progress (can take 1-2 s on large files).
+    const loadingPlayheadPct = `${progress}%`;
+    return (
+      <div className="h-[68px] rounded-lg border-2 border-[#e9e9e9] overflow-hidden relative bg-[#f5f5f5]">
+        <div className="absolute inset-0 flex items-center justify-center text-[10px] text-[#c0c0c0] select-none pointer-events-none">
+          Loading waveform…
+        </div>
+        {progress > 0 && (
+          <div
+            className="absolute top-0 bottom-0 w-px bg-[#f37321] pointer-events-none"
+            style={{ left: loadingPlayheadPct }}
+          />
+        )}
+      </div>
+    );
   }
 
   if (sectionMarkers.length === 0) {
@@ -1273,7 +1362,6 @@ function SectionedWaveform({
       ref={containerRef}
       className="flex gap-1 items-stretch w-full min-w-0 relative select-none"
       onMouseDown={onRegionSelect ? e => {
-        if (slicingIndex !== null) return; // don't start region-select while in slice mode
         const snapped = snapToGrid(getContainerRatio(e.clientX), e.altKey);
         selDragRef.current = { startX: e.clientX, startRatio: snapped };
         setLiveSel(null);
@@ -1345,8 +1433,11 @@ function SectionedWaveform({
             isBar:      b.beatIndex % 4 === 0,
           }));
 
-        const isActive = activeSectionIndex === i;
+        // Highlight if: (a) playback-driven (no track pinned) or (b) this track was clicked
+        const isActive = activeSectionIndex === i &&
+          (activeTrackId === null || activeTrackId === undefined || activeTrackId === trackId);
         const widthPct = chunkSpan * 100;
+
 
         return (
           <div
@@ -1357,18 +1448,16 @@ function SectionedWaveform({
             {/* Main chunk box */}
             <div
               className={`rounded-lg border-2 overflow-hidden transition-all duration-150 ${
-                slicingIndex === i
+                (regeneratingSectionIndex === i && (!regeneratingTrackId || !trackId || regeneratingTrackId === trackId))
+                  || isActive
                   ? 'border-[#f37321] bg-[#fff8f3]'
-                  : isActive
-                    ? 'border-[#f37321] bg-[#fff8f3]'
-                    : 'border-[#e9e9e9] bg-white hover:border-[#bdbdbd]'
+                  : 'border-[#e9e9e9] bg-white hover:border-[#bdbdbd]'
               }`}
               onClick={e => {
-                if (slicingIndex === i) return;
                 onSectionClick?.(i);
                 onSeek(startR);
               }}
-              onDoubleClick={onRegionSelect && slicingIndex === null ? e => {
+              onDoubleClick={onRegionSelect ? e => {
                 e.stopPropagation();
                 onRegionSelect(startR, endR);
               } : undefined}
@@ -1392,28 +1481,6 @@ function SectionedWaveform({
                           <line x1="2" y1="4" x2="14" y2="4"/>
                           <line x1="2" y1="8" x2="11" y2="8"/>
                           <line x1="2" y1="12" x2="7" y2="12"/>
-                        </svg>
-                      </button>
-                    )}
-                    {/* Scissors / slice icon */}
-                    {onSliceSection && (
-                      <button
-                        type="button"
-                        title={slicingIndex === i ? 'Cancel slice (Esc)' : 'Slice section'}
-                        onClick={e => {
-                          e.stopPropagation();
-                          setSlicingIndex(slicingIndex === i ? null : i);
-                          setSliceHover(null);
-                        }}
-                        className={`p-0.5 rounded hover:bg-black/10 transition-colors ${
-                          slicingIndex === i ? 'text-[#f37321]' : 'text-[#929292]'
-                        }`}
-                      >
-                        <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                          <circle cx="4" cy="4" r="2.5"/>
-                          <circle cx="4" cy="12" r="2.5"/>
-                          <line x1="6.5" y1="5.5" x2="14" y2="13.5"/>
-                          <line x1="6.5" y1="10.5" x2="14" y2="2.5"/>
                         </svg>
                       </button>
                     )}
@@ -1445,37 +1512,26 @@ function SectionedWaveform({
                   </div>
                 )}
               </div>
-              {/* Per-section waveform — slice mode intercepts mouse events */}
-              <div
-                className={slicingIndex === i ? 'relative cursor-crosshair' : 'relative'}
-                onMouseMove={slicingIndex === i ? e => {
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  setSliceHover(Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)));
-                } : undefined}
-                onMouseLeave={slicingIndex === i ? () => setSliceHover(null) : undefined}
-                onClick={slicingIndex === i ? e => {
-                  e.stopPropagation();
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  const localR = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-                  onSliceSection?.(i, localR);
-                  setSlicingIndex(null);
-                  setSliceHover(null);
-                } : undefined}
-              >
-                {/* Slice hover line */}
-                {slicingIndex === i && sliceHover !== null && (
-                  <div
-                    className="absolute top-0 bottom-0 w-0.5 bg-[#f37321] pointer-events-none z-10"
-                    style={{ left: `${sliceHover * 100}%` }}
-                  />
-                )}
+              <div className="relative">
                 <ChunkCanvas
                   peaks={slice}
                   progress={chunkProg}
                   isActive={isActive}
                   beats={chunkBeats}
-                  onSeek={slicingIndex !== i ? r => { onSectionClick?.(i); onSeek(startR + r * (endR - startR)); } : undefined}
+                  onSeek={r => { onSectionClick?.(i); onSeek(startR + r * (endR - startR)); }}
                 />
+                {regeneratingSectionIndex === i &&
+                 (!regeneratingTrackId || !trackId || regeneratingTrackId === trackId) && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-[#fff8f3]/80 pointer-events-none">
+                    <svg
+                      className="animate-spin text-[#f37321]"
+                      width="22" height="22" viewBox="0 0 24 24" fill="none"
+                      stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"
+                    >
+                      <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+                    </svg>
+                  </div>
+                )}
               </div>
             </div>
             {/* Regen mode popover — outside overflow-hidden so it can float above siblings */}
@@ -1673,12 +1729,11 @@ interface TrackRowProps {
   onRegenerate?: () => void;
   regenerating?: boolean;
   onDelete?: () => void;
-  downloadUrl?: string;
-  downloadFilename?: string;
+  onDownload?: () => void;
   children: React.ReactNode; // waveform
 }
 
-function TrackRow({ label, playing, volume, onToggle, onVolumeChange, onRegenerate, regenerating, onDelete, downloadUrl, downloadFilename, children }: TrackRowProps) {
+function TrackRow({ label, playing, volume, onToggle, onVolumeChange, onRegenerate, regenerating, onDelete, onDownload, children }: TrackRowProps) {
   return (
     <div className="flex items-center gap-3">
       {/* Volume */}
@@ -1733,17 +1788,16 @@ function TrackRow({ label, playing, volume, onToggle, onVolumeChange, onRegenera
       )}
 
       {/* Download */}
-      {downloadUrl && (
-        <a
-          href={downloadUrl}
-          download={downloadFilename}
+      {onDownload && (
+        <button
+          onClick={onDownload}
           title={`Download ${label}`}
           className="w-6 h-6 flex items-center justify-center rounded text-[#bdbdbd] hover:text-[#f37321] transition-colors flex-shrink-0"
         >
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
           </svg>
-        </a>
+        </button>
       )}
 
       {/* Delete — always reserve space so all rows have identical waveform widths */}

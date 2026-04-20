@@ -1,138 +1,17 @@
 import type { AudioProvider, AudioResult, SectionRegenerationContext } from './types';
 import type { Song, SectionType, WordTimestamp } from '../types';
 import { getVocalStyleTags } from '../vocalists';
+import {
+  SECTION_STYLES,
+  tokenize, normalizeStyleText, extractStyleTerms, excludedGenres,
+  extractInstruments, instrumentExclusions,
+} from './sectionStyles';
 
-const SECTION_STYLES: Record<SectionType, { positive: string[]; negative: string[] }> = {
-  intro:        { positive: ['atmospheric', 'building', 'anticipation'], negative: ['abrupt', 'climactic'] },
-  verse:        { positive: ['storytelling', 'melodic', 'building tension'], negative: ['climactic', 'chaotic'] },
-  'pre-chorus': { positive: ['building', 'anticipation', 'rising energy'], negative: ['dropping', 'subdued'] },
-  chorus:       { positive: ['anthemic', 'powerful', 'catchy', 'uplifting'], negative: ['subdued', 'quiet', 'sparse'] },
-  bridge:       { positive: ['contrast', 'emotional depth', 'surprising'], negative: ['predictable', 'repetitive'] },
-  outro:        { positive: ['resolution', 'fading', 'reflective'], negative: ['abrupt', 'building'] },
-};
-
-/** Round bars to nearest multiple of 2, with 1 as the only allowed odd value. */
-function roundToBars(bars: number): number {
-  if (bars <= 1) return 1;
-  return Math.max(2, Math.round(bars / 2) * 2);
-}
-
-function estimateDurationMs(_lines: string[], tempo: number): number {
-  // Default to 8 bars; durationMs should always be explicitly set upstream
-  return Math.round(8 * 240000 / tempo);
-}
-
-// Genre terms only — used for exclusion negatives
-const GENRE_VOCABULARY = [
-  'folk', 'rock', 'pop', 'jazz', 'blues', 'country', 'electronic', 'ambient', 'indie',
-  'classical', 'hip-hop', 'r&b', 'soul', 'reggae', 'punk', 'metal', 'acoustic', 'cinematic',
-  'funk', 'disco', 'gospel', 'latin', 'bossa nova', 'samba', 'trap', 'dancehall', 'ska',
-  'house', 'techno', 'edm', 'synth-pop', 'new wave', 'grunge', 'alt-rock', 'hard rock',
-  'heavy metal', 'death metal', 'progressive', 'psychedelic', 'neo-soul', 'afrobeat',
-  'swing', 'bebop', 'bluegrass', 'americana', 'indie pop', 'indie rock', 'dream pop',
-];
-
-const STYLE_VOCABULARY = [
-  ...GENRE_VOCABULARY,
-  // Texture / production
-  'reverb', 'echo', 'warm', 'bright', 'dark', 'raw', 'polished', 'lo-fi', 'intimate',
-  'sparse', 'lush', 'layered', 'minimal', 'driving', 'groovy', 'fingerpicking', 'strumming',
-  'arpeggiated', 'distorted', 'clean', 'melancholic', 'energetic', 'mellow', 'dramatic',
-  'uplifting', 'nostalgic', 'upbeat', 'atmospheric', 'confessional', 'anthemic', 'funky',
-  'syncopated', 'rhythmic', 'bass-heavy', 'horn-driven', 'organ-driven',
-  // Vocals
-  'falsetto', 'harmonies', 'breathy', 'powerful', 'delicate', 'raspy', 'smooth',
-  'male vocalist', 'female vocalist', 'male vocal', 'female vocal',
-];
-
-// Alternate spellings / common variants that should map to canonical vocabulary terms
-const STYLE_ALIASES: [RegExp, string][] = [
-  [/\bhip hop\b/g,       'hip-hop'],
-  [/\br&b\b|\brnb\b|\br 'n' b\b|\br and b\b/g, 'r&b'],
-  [/\balt rock\b/g,      'alt-rock'],
-  [/\bsynth pop\b/g,     'synth-pop'],
-  [/\bneo soul\b/g,      'neo-soul'],
-  [/\blo fi\b|\blofi\b/g,'lo-fi'],
-  [/\bbass heavy\b/g,    'bass-heavy'],
-  [/\bhorn driven\b/g,   'horn-driven'],
-  [/\borgan driven\b/g,  'organ-driven'],
-  [/\bheavy metal\b/g,   'heavy metal'],  // already canonical but keep for safety
-  [/\bhard rock\b/g,     'hard rock'],
-  [/\bdream pop\b/g,     'dream pop'],
-  [/\bindie pop\b/g,     'indie pop'],
-  [/\bindie rock\b/g,    'indie rock'],
-  [/\bbossa nova\b/g,    'bossa nova'],
-];
-
-// Common English connectives, articles, and prepositions that carry no musical meaning
-const FILLER_WORDS = new Set([
-  'a', 'an', 'the', 'and', 'or', 'but', 'for', 'nor', 'so', 'yet',
-  'to', 'in', 'of', 'is', 'it', 'at', 'by', 'as', 'up', 'its',
-  'with', 'that', 'this', 'from', 'into', 'very', 'also',
-]);
-
-/** Split text into style tokens, dropping filler words and anything under 3 characters. */
-function tokenize(text: string): string[] {
-  return text.split(/[\s,/]+/).filter(s => s.length > 2 && !FILLER_WORDS.has(s));
-}
-
-function normalizeStyleText(text: string): string {
-  let s = text.toLowerCase();
-  for (const [pattern, canonical] of STYLE_ALIASES) {
-    s = s.replace(pattern, canonical);
-  }
-  return s;
-}
-
-function extractStyleTerms(text: string): string[] {
-  const normalized = normalizeStyleText(text);
-  return STYLE_VOCABULARY.filter(term => normalized.includes(term));
-}
-
-/**
- * Returns every genre in GENRE_VOCABULARY that is NOT matched by activeGenreText.
- * Used to fill negative styles so ElevenLabs knows to avoid all other genres.
- */
-function excludedGenres(activeGenreText: string): string[] {
-  const normalized = normalizeStyleText(activeGenreText);
-  const active = new Set(GENRE_VOCABULARY.filter(g => normalized.includes(g)));
-  return GENRE_VOCABULARY.filter(g => !active.has(g));
-}
-
-const KNOWN_INSTRUMENTS = [
-  'acoustic guitar', 'electric guitar', 'bass guitar', 'drum kit',
-  'guitar', 'bass', 'drums', 'percussion', 'piano', 'keyboard', 'synth', 'synthesizer',
-  'violin', 'viola', 'cello', 'strings', 'orchestra', 'trumpet', 'saxophone', 'sax',
-  'flute', 'clarinet', 'trombone', 'horns', 'brass', 'banjo', 'mandolin', 'ukulele',
-  'harp', 'organ', 'hammond', 'pad', 'pads', 'choir', 'vocals',
-  '808', 'hi-hat', 'snare', 'kick',
-];
-
-const DEFAULT_INSTRUMENTS = ['guitar', 'drums', 'bass'];
-
-function extractInstruments(text: string): string[] {
-  const lower = text.toLowerCase();
-  const found = KNOWN_INSTRUMENTS.filter(inst => lower.includes(inst));
-  return found.length > 0 ? found : DEFAULT_INSTRUMENTS;
-}
-
-/**
- * Returns every instrument in KNOWN_INSTRUMENTS that is NOT covered by the chosen instruments.
- * Uses substring matching in both directions so choosing 'guitar' won't negate 'acoustic guitar'.
- * Vocal-adjacent instruments ('vocals', 'choir') are omitted when the section has lyrics.
- */
-function instrumentExclusions(chosenInstruments: string[], hasLyrics: boolean): string[] {
-  const VOCAL_INSTRUMENTS = new Set(['vocals', 'choir']);
-  const lower = chosenInstruments.map(i => i.toLowerCase());
-  return KNOWN_INSTRUMENTS.filter(inst => {
-    if (hasLyrics && VOCAL_INSTRUMENTS.has(inst)) return false;
-    return !lower.some(chosen => chosen.includes(inst) || inst.includes(chosen));
-  });
-}
 
 interface MultipartResult {
   wordTimestamps: WordTimestamp[];
   audioBuffer: Buffer;
+  songId?: string;
 }
 
 function parseMultipart(buf: Buffer, boundary: string): MultipartResult {
@@ -141,6 +20,7 @@ function parseMultipart(buf: Buffer, boundary: string): MultipartResult {
   const boundaryPos = buf.indexOf(boundaryBuf, jsonStart);
   const json = JSON.parse(buf.slice(jsonStart, boundaryPos > -1 ? boundaryPos : buf.length).toString('utf8'));
   const wordTimestamps: WordTimestamp[] = json.words_timestamps ?? [];
+  const songId: string | undefined = json.song_id;
 
   const id3Pos = buf.indexOf(Buffer.from('ID3'));
   if (id3Pos === -1) throw new Error('No audio found in multipart response');
@@ -148,7 +28,7 @@ function parseMultipart(buf: Buffer, boundary: string): MultipartResult {
   const trailingBoundary = buf.indexOf(Buffer.from(`\r\n--${boundary}--`), id3Pos);
   const audioBuffer = buf.slice(id3Pos, trailingBoundary > -1 ? trailingBoundary : undefined);
 
-  return { wordTimestamps, audioBuffer };
+  return { wordTimestamps, audioBuffer, songId };
 }
 
 export class ElevenLabsProvider implements AudioProvider {
@@ -159,7 +39,7 @@ export class ElevenLabsProvider implements AudioProvider {
   }
 
   /** Makes one API call and returns the audio URL + timestamps. */
-  private async callAPI(body: object): Promise<{ audioUrl: string; wordTimestamps: WordTimestamp[] }> {
+  private async callAPI(body: object): Promise<{ audioUrl: string; wordTimestamps: WordTimestamp[]; songId?: string }> {
     const res = await fetch('https://api.elevenlabs.io/v1/music/detailed', {
       method: 'POST',
       headers: { 'xi-api-key': this.apiKey, 'Content-Type': 'application/json' },
@@ -170,10 +50,11 @@ export class ElevenLabsProvider implements AudioProvider {
     const boundaryMatch = ct.match(/boundary=([^\s;]+)/);
     if (!boundaryMatch) throw new Error('Expected multipart response');
     const buf = Buffer.from(await res.arrayBuffer());
-    const { wordTimestamps, audioBuffer } = parseMultipart(buf, boundaryMatch[1]);
+    const { wordTimestamps, audioBuffer, songId } = parseMultipart(buf, boundaryMatch[1]);
     return {
       audioUrl: `data:audio/mpeg;base64,${audioBuffer.toString('base64')}`,
       wordTimestamps,
+      songId,
     };
   }
 
@@ -193,7 +74,7 @@ export class ElevenLabsProvider implements AudioProvider {
     const normMood  = normalizeStyleText(song.mood);
     const styleTerms = extractStyleTerms(song.genre + ' ' + song.mood);
 
-    const positiveGlobal = [
+    let positiveGlobal = [
       normGenre,                                                             // full phrase — highest priority
       ...tokenize(normGenre),              // individual tokens
       ...tokenize(normMood),
@@ -203,17 +84,35 @@ export class ElevenLabsProvider implements AudioProvider {
       'starts on beat 1', 'downbeat entry', 'on the beat',
     ];
 
-    const negativeGlobal = [
+    // Apply user overrides to global positive tags
+    if (song.positiveGlobalRemove?.length || song.positiveGlobalAdd?.length) {
+      const removedSet = new Set(song.positiveGlobalRemove ?? []);
+      positiveGlobal = [
+        ...positiveGlobal.filter(t => !removedSet.has(t)),
+        ...(song.positiveGlobalAdd ?? []),
+      ];
+    }
+
+    let negativeGlobal = [
       'noise', 'distortion',
       'pickup notes', 'anacrusis', 'before the beat', 'upbeat start', 'pre-beat',
       ...(forceInstrumental ? ['vocals', 'singing', 'voice', 'lyrics', 'acapella'] : ['acapella', 'vocals only']),
       ...excludedGenres(normGenre),   // every other genre — lowest priority, trimmed to fit
     ].slice(0, 50);
 
+    // Apply user overrides to global negative tags
+    if (song.negativeGlobalRemove?.length || song.negativeGlobalAdd?.length) {
+      const removedSet = new Set(song.negativeGlobalRemove ?? []);
+      negativeGlobal = [
+        ...negativeGlobal.filter(t => !removedSet.has(t)),
+        ...(song.negativeGlobalAdd ?? []),
+      ];
+    }
+
     // Global genre tokens — used to suppress conflicting global style in per-section negatives
     const globalGenreTokens = tokenize(normGenre);
 
-    const sections = song.sections.map(section => {
+    const sections = song.sections.map((section, sectionIndex) => {
       // For instrumental-only, treat every section as having no lyrics
       const lines = forceInstrumental
         ? []
@@ -274,11 +173,11 @@ export class ElevenLabsProvider implements AudioProvider {
         if (hasMale && !hasFemale) vocalistGenderNegatives.push('female vocal', 'female vocalist', 'female voice');
       }
 
-      // Priority order: chords first (exact, must follow), then section style, vocals, mood, section type, instruments
+      // Priority order: genre first (strongest identity signal), then chords, beat-alignment, vocals, mood, section type, instruments
       let positiveLocal = [
+        ...sectionStyleTags,      // section genre — first and highest priority
         'starts on beat 1', 'downbeat entry',  // beat-alignment — must precede lyrics
-        ...chordTags,             // chord progression — highest priority when specified
-        ...sectionStyleTags,      // section genre
+        ...chordTags,             // chord progression
         ...vocalTags,             // vocalist
         ...sectionMoodTags,
         ...styles.positive,
@@ -319,9 +218,7 @@ export class ElevenLabsProvider implements AudioProvider {
         }
         // If style changed: no consistency nudges — let the new style tags drive the output freely
 
-        // ── Transition context: what comes before and after ──────────────────────
-        // Tell the model what musical territory it's connecting, so it can generate
-        // an appropriate entry and exit. Applied for all regeneration modes.
+        // ── Prev-section context only — earlier sections are not influenced by later ones ──
         if (prevSection) {
           const prevStyle = prevSection.style ? normalizeStyleText(prevSection.style) : null;
           const prevLastChord = prevSection.chords[prevSection.chords.length - 1];
@@ -336,30 +233,50 @@ export class ElevenLabsProvider implements AudioProvider {
             ...(prevMoodTokens.length ? [`from ${prevMoodTokens[0]}`] : []),
           ];
         }
+      }
 
-        if (nextSection) {
-          const nextStyle = nextSection.style ? normalizeStyleText(nextSection.style) : null;
-          const nextFirstChord = nextSection.chords[0];
-          const nextMoodTokens = nextSection.mood
-            ? tokenize(normalizeStyleText(nextSection.mood))
-            : [];
-          const buildToChorus = nextSection.type === 'chorus';
-          const buildToBridge = nextSection.type === 'bridge';
-          positiveLocal = [
-            ...positiveLocal,
-            `leads into ${nextSection.type}`,
-            ...(nextFirstChord ? [`resolving to ${nextFirstChord}`] : []),
-            ...(nextStyle ? [`transitioning to ${nextStyle}`] : []),
-            ...(buildToChorus ? ['building to chorus', 'rising energy', 'anticipation'] : []),
-            ...(buildToBridge ? ['contrast approaching', 'surprising turn'] : []),
-            ...(nextMoodTokens.length ? [`into ${nextMoodTokens[0]}`] : []),
-          ];
+      // If this section is followed by another, suppress ElevenLabs' natural outro fade.
+      // For full-song generation use the array index; for regeneration use sectionContext.nextSection.
+      const hasNextSection = sectionContext
+        ? !!sectionContext.nextSection
+        : sectionIndex < song.sections.length - 1;
+      if (hasNextSection) {
+        if (sectionContext) {
+          // Section regen: we generate a natural 4-beat tail for crossfading — don't signal
+          // an ending at all. Omit 'abrupt ending', 'outro', 'ending' entirely so ElevenLabs
+          // keeps the music flowing into the tail naturally.
+          positiveLocal = ['no fadeout', 'continues', ...positiveLocal];
+          negativeLocal = ['fadeout', 'fade out', 'fade', 'ending', ...negativeLocal].slice(0, 50);
+        } else {
+          // Full-song generation: abrupt so ElevenLabs doesn't add a fade before the next section.
+          positiveLocal = ['no fadeout', 'abrupt ending', 'continues', ...positiveLocal];
+          negativeLocal = ['fadeout', 'fade out', 'fade', 'outro', 'ending', ...negativeLocal].slice(0, 50);
         }
       }
 
-      const durationMs = section.durationMs
+      positiveLocal = positiveLocal.slice(0, 50);
+
+      // Apply user overrides: remove explicitly removed tags, append custom additions.
+      if (section.positiveStylesRemove?.length || section.positiveStylesAdd?.length) {
+        const removedSet = new Set(section.positiveStylesRemove ?? []);
+        positiveLocal = [
+          ...positiveLocal.filter(t => !removedSet.has(t)),
+          ...(section.positiveStylesAdd ?? []),
+        ].slice(0, 50);
+      }
+
+      // Bars are authoritative — lyrics never affect section length.
+      // Fall back to 4 bars if durationMs is somehow unset.
+      // For section regen with a following section, generate 4 extra beats so the client
+      // can crossfade 1 beat into the next section and discard the remaining tail.
+      const TAIL_EXTRA_BEATS = 4;
+      const beatMs = Math.round(60000 / song.tempo);
+      const baseDurationMs = section.durationMs
         ? Math.min(120000, Math.max(3000, section.durationMs))
-        : estimateDurationMs(lines, song.tempo);
+        : Math.min(120000, Math.round(4 * 240000 / song.tempo));
+      const durationMs = (sectionContext && hasNextSection)
+        ? Math.min(120000, baseDurationMs + TAIL_EXTRA_BEATS * beatMs)
+        : baseDurationMs;
 
       return {
         section_name: section.label,
@@ -382,11 +299,7 @@ export class ElevenLabsProvider implements AudioProvider {
 
   async generate(song: Song, sectionContext?: SectionRegenerationContext, forceInstrumental = false): Promise<AudioResult> {
     const vocalsOnly = sectionContext?.vocalsOnly ?? false;
-
-    if (vocalsOnly) {
-      return this.generateVocals(song, sectionContext);
-    }
-
+    if (vocalsOnly) return this.generateVocals(song, sectionContext);
     return this.callAPI(this.buildCompositionBody(song, forceInstrumental, sectionContext));
   }
 
@@ -426,7 +339,7 @@ export class ElevenLabsProvider implements AudioProvider {
       ],
       duration_ms: section.durationMs
         ? Math.min(120000, Math.max(3000, section.durationMs))
-        : estimateDurationMs(lines, song.tempo),
+        : Math.min(120000, Math.round(4 * 240000 / song.tempo)),
       lines,
     }];
 
