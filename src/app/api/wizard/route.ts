@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { streamAnthropic } from '@/lib/llm';
 
 export const maxDuration = 120;
 
@@ -59,16 +58,60 @@ LYRICS RULES
 
 interface GatewayMessage { role: string; content: string; }
 
+async function* streamWizard(messages: GatewayMessage[], system: string): AsyncGenerator<string> {
+  const res = await fetch(process.env.LLM_GATEWAY_URL!, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.LLM_GATEWAY_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 2048,
+      stream: true,
+      messages: [
+        { role: 'system', content: system },
+        ...messages,
+      ],
+    }),
+  });
+
+  if (!res.ok) throw new Error(`LLM Gateway error: ${res.status} ${await res.text()}`);
+
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      const data = trimmed.slice(5).trim();
+      if (data === '[DONE]') continue;
+      try {
+        const chunk = JSON.parse(data);
+        const content = chunk.choices?.[0]?.delta?.content;
+        if (content) yield content;
+      } catch { /* skip malformed chunks */ }
+    }
+  }
+}
+
 export async function POST(req: NextRequest) {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    return NextResponse.json({ error: 'Anthropic API key not configured' }, { status: 503 });
+  if (!process.env.LLM_GATEWAY_URL || !process.env.LLM_GATEWAY_API_KEY) {
+    return NextResponse.json({ error: 'LLM gateway not configured' }, { status: 503 });
   }
 
   const { messages, character } = await req.json() as { messages: GatewayMessage[]; character?: string };
   const charName = character === 'amber' ? 'Amber' : 'Axel';
 
   const encoder = new TextEncoder();
-  const gen = streamAnthropic(makeSystem(charName), messages, 2048);
+  const gen = streamWizard(messages, makeSystem(charName));
 
   const stream = new ReadableStream({
     async pull(controller) {
