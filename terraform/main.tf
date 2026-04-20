@@ -43,10 +43,24 @@ resource "aws_amplify_app" "songwriting_engine" {
   EOT
 
   environment_variables = {
-    ANTHROPIC_API_KEY = var.anthropic_api_key
-    SUNO_API_KEY      = var.suno_api_key
-    NEXTAUTH_SECRET   = var.nextauth_secret
-    NEXTAUTH_URL      = var.nextauth_url
+    # LLM providers — gateway takes priority; Anthropic API is the fallback
+    ANTHROPIC_API_KEY   = var.anthropic_api_key
+    LLM_GATEWAY_URL     = var.llm_gateway_url
+    LLM_GATEWAY_API_KEY = var.llm_gateway_api_key
+
+    # Auth
+    NEXTAUTH_SECRET      = var.nextauth_secret
+    NEXTAUTH_URL         = var.nextauth_url
+    GOOGLE_CLIENT_ID     = var.google_client_id
+    GOOGLE_CLIENT_SECRET = var.google_client_secret
+
+    # Audio providers
+    SUNO_API_KEY        = var.suno_api_key
+    ELEVENLABS_API_KEY  = var.elevenlabs_api_key
+    DEEPGRAM_API_KEY    = var.deepgram_api_key
+    FAL_KEY             = var.fal_key
+    REPLICATE_API_TOKEN = var.replicate_api_token
+
     # Tells Amplify to manage the Next.js framework version
     _LIVE_UPDATES = jsonencode([{
       name    = "Next.js version"

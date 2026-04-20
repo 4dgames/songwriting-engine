@@ -1,4 +1,5 @@
 import type { Song } from './types';
+import { streamLLM as streamLLMProvider } from './llm';
 
 const SYSTEM_PROMPT = `You are a professional songwriter and music producer. When given a description of a song, you return a structured JSON object representing the complete song.
 
@@ -41,48 +42,8 @@ Guidelines:
 - The audioPrompt is a human-readable summary — not a generation prompt. Describe the overall sound: genre blend, tempo feel, key instruments, vocal style, energy arc across the song
 - For instruments: extract any instruments mentioned in the user's prompt and distribute them across sections. Add/remove instruments across sections to reflect natural song dynamics (e.g. sparse intro, full chorus, stripped-back bridge)`;
 
-async function* streamLLM(userPrompt: string): AsyncGenerator<string> {
-  const res = await fetch(process.env.LLM_GATEWAY_URL!, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${process.env.LLM_GATEWAY_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 4096,
-      stream: true,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: userPrompt },
-      ],
-    }),
-  });
-
-  if (!res.ok) throw new Error(`LLM Gateway error: ${res.status} ${await res.text()}`);
-
-  const reader = res.body!.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() ?? '';
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith('data:')) continue;
-      const data = trimmed.slice(5).trim();
-      if (data === '[DONE]') continue;
-      try {
-        const chunk = JSON.parse(data);
-        const content = chunk.choices?.[0]?.delta?.content;
-        if (content) yield content;
-      } catch { /* skip malformed chunks */ }
-    }
-  }
+function streamLLM(userPrompt: string): AsyncGenerator<string> {
+  return streamLLMProvider(SYSTEM_PROMPT, [{ role: 'user', content: userPrompt }], 4096);
 }
 
 /** Streams raw text deltas — used by the API route to push progress to the client. */
