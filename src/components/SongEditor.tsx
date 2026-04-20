@@ -4,12 +4,11 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 're
 import type { Song, SongSection, WordTimestamp, SectionTake } from '@/lib/types';
 import SectionEditor from './SectionEditor';
 import AudioPlayer from './AudioPlayer';
-import { splitStereoToTracks } from '@/lib/audio/split';
 import { toBlobUrl, mixTracks } from '@/lib/audio/mix';
-import TimelineEditor, { type TimelineTrack } from './TimelineEditor';
 import { alignTracks } from '@/lib/audio/align';
 import { trimLeadingSilence } from '@/lib/audio/trimSilence';
 import { trimToDownbeat } from '@/lib/audio/beatDetect';
+import { computeCompositionPlan, computeGlobalCompositionPlan } from '@/lib/audio/sectionStyles';
 import { insertAudioAtMs, cutAudioRegion } from '@/lib/audio/splice';
 
 /**
@@ -128,18 +127,6 @@ interface SongTake {
   sections: SongSection[];
 }
 
-interface SectionRegeneration {
-  sectionIndex: number;
-  audioUrl: string;
-  instrumentalUrl?: string;
-  vocalsUrl?: string;
-  wordTimestamps: WordTimestamp[];
-  vocalsOnly: boolean;
-  instrumentalOnly: boolean;
-  sectionStartMs?: number;
-  sectionEndMs?: number;
-}
-
 export interface SongEditorHandle {
   /** Returns the current live project state for serialisation / saving. */
   getProjectState(): {
@@ -174,6 +161,8 @@ interface Props {
   onInstrumentalUrlChange?: (url: string) => void;
   /** Pre-loaded project state (skips generation, goes straight to the player). */
   initialState?: InitialState;
+  /** Called when user clicks "Edit Song Plan" — parent should re-open the input panel. */
+  onEditSongPlan?: () => void;
 }
 
 const makeTakeId = () => `take-${crypto.randomUUID()}`;
@@ -193,24 +182,8 @@ function deriveStemLabels(sections: SongSection[]): { drums: string; bass: strin
   return { drums: join(drumsGroup, 'Drums'), bass: join(bassGroup, 'Bass'), other: join(otherGroup, 'Other') };
 }
 
-/** 8 bars at the given tempo, in milliseconds. */
-function defaultDurationMs(tempo: number): number {
-  return Math.round(8 * 240000 / tempo);
-}
-
-/** Compute cumulative [startMs, endMs] for each section based on its durationMs. */
-function computeSectionTimings(sections: SongSection[], tempo: number): { startMs: number; endMs: number }[] {
-  let cursor = 0;
-  return sections.map(s => {
-    const dur = s.durationMs ?? defaultDurationMs(tempo);
-    const start = cursor;
-    cursor += dur;
-    return { startMs: start, endMs: cursor };
-  });
-}
-
 /** Determine which part of a section has changed vs its locked (last-generated) version. */
-function getSectionDirtyMode(current: SongSection, locked: SongSection): 'vocals' | 'instruments' | 'both' | null {
+function getSectionDirtyMode(current: SongSection, locked: SongSection): 'vocals' | 'both' | null {
   const lyricsChanged = current.lyrics !== locked.lyrics;
   const nonLyricsChanged =
     JSON.stringify(current.chords) !== JSON.stringify(locked.chords) ||
@@ -218,7 +191,6 @@ function getSectionDirtyMode(current: SongSection, locked: SongSection): 'vocals
     JSON.stringify(current.instruments ?? []) !== JSON.stringify(locked.instruments ?? []);
   if (!lyricsChanged && !nonLyricsChanged) return null;
   if (lyricsChanged && !nonLyricsChanged) return 'vocals';
-  if (!lyricsChanged && nonLyricsChanged) return 'instruments';
   return 'both';
 }
 
@@ -228,17 +200,35 @@ function newSection(afterIndex: number, sections: SongSection[], tempo: number):
     label: `Section ${sections.length + 1}`,
     lyrics: '',
     chords: [],
-    durationMs: defaultDurationMs(tempo),
+    durationMs: Math.round(4 * 240000 / tempo),
   };
 }
 
-const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ song: initial, audioPrompt, onAudioPromptChange, autoGenerate, playRequestCount, onAudioReady, onGenerationStart, sectionsOpen, onSectionsOpenChange, onInstrumentalUrlChange, initialState }, ref) {
+/** Computes section timings directly from the bars/durationMs on each section.
+ *  Used after regeneration so markers always reflect the bars shown in the UI,
+ *  rather than being scaled to the actual audio duration. */
+function timingsFromBars(
+  sections: SongSection[],
+  tempo: number,
+): { startMs: number; endMs: number }[] {
+  let pos = 0;
+  return sections.map(s => {
+    const startMs = Math.round(pos);
+    const durMs   = s.durationMs ?? Math.round(4 * 240000 / tempo);
+    const endMs   = Math.round(pos + durMs);
+    pos = endMs;
+    return { startMs, endMs };
+  });
+}
+
+
+const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ song: initial, audioPrompt, onAudioPromptChange, autoGenerate, playRequestCount, onAudioReady, onGenerationStart, sectionsOpen, onSectionsOpenChange, onInstrumentalUrlChange, initialState, onEditSongPlan }, ref) {
   const [song, setSong] = useState<Song>(() => ({
     ...initial,
     sections: initial.sections.map(s => ({
       ...s,
       style: s.style ?? initial.genre.toLowerCase(),
-      durationMs: s.durationMs ?? defaultDurationMs(initial.tempo),
+      durationMs: s.durationMs ?? Math.round(4 * 240000 / initial.tempo),
     })),
   }));
   const didAutoGenerate = useRef(false);
@@ -290,7 +280,7 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
 
   const [generating, setGenerating] = useState(false);
   const [separating, setSeparating] = useState(false);
-  const [separationMethod, setSeparationMethod] = useState<'elevenlabs' | 'ica' | null>(null);
+  const [separationMethod, setSeparationMethod] = useState<'elevenlabs' | null>(null);
   const [generateMode, setGenerateMode] = useState<'both' | 'instrumental' | 'vocals'>('both');
   const forceInstrumental = generateMode === 'instrumental'; // derived — keeps downstream code unchanged
   const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
@@ -299,6 +289,7 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
   const [regeneratingInstrumental, setRegeneratingInstrumental] = useState(false);
   const [audioProgress, setAudioProgress] = useState(0);
   const audioCrawlRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const generateAbortRef = useRef<AbortController | null>(null);
 
   const [separationProgress, setSeparationProgress] = useState(0);
   const [separationStep,     setSeparationStep]     = useState('');
@@ -312,6 +303,7 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
   const [error, setError] = useState('');
   const [playAudioTrigger,  setPlayAudioTrigger]  = useState(0);
   const [pauseAudioTrigger, setPauseAudioTrigger] = useState(0);
+  const [isAudioPlaying,    setIsAudioPlaying]    = useState(false);
 
   // Recorded vocal takes — newest first; only the active one plays
   const [extraVocalTracks,    setExtraVocalTracks]    = useState<{ id: string; url: string; label: string }[]>([]);
@@ -319,7 +311,6 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
   const [vocalsGo,            setVocalsGo]            = useState(false);
 
   // Timeline editor + mix-down
-  const [showTimeline,  setShowTimeline]  = useState(false);
   const [mixingDown,    setMixingDown]    = useState(false);
 
   // ── Vocals recording ──────────────────────────────────────────────────────────
@@ -332,6 +323,28 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
   const vocalsStreamRef    = useRef<MediaStream | null>(null);
   const onAudioReadyRef = useRef(onAudioReady);
   useEffect(() => { onAudioReadyRef.current = onAudioReady; }, [onAudioReady]);
+
+  const audioPlayerRef = useRef<HTMLDivElement>(null);
+  const shouldScrollToAudioRef = useRef(false);
+  useEffect(() => {
+    if (!liveInstrumentalUrl || !shouldScrollToAudioRef.current) return;
+    shouldScrollToAudioRef.current = false;
+    audioPlayerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [liveInstrumentalUrl]);
+
+  // After section regeneration, seek to and play from that section once AudioPlayer remounts.
+  const playAfterRegenRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (playAfterRegenRef.current === null) return;
+    const idx = playAfterRegenRef.current;
+    playAfterRegenRef.current = null;
+    // Short delay to allow the remounted AudioPlayer to load audio and compute section markers.
+    const timer = setTimeout(() => {
+      setPlaySectionRequest(prev => ({ index: idx, seq: (prev?.seq ?? 0) + 1 }));
+    }, 400);
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [audioResetKey]);
 
   const onInstrumentalUrlChangeRef = useRef(onInstrumentalUrlChange);
   useEffect(() => { onInstrumentalUrlChangeRef.current = onInstrumentalUrlChange; }, [onInstrumentalUrlChange]);
@@ -394,22 +407,41 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
     return () => { if (audioCrawlRef.current) clearInterval(audioCrawlRef.current); };
   }, [generating]);
   const [regeneratingSectionIndex, setRegeneratingSectionIndex] = useState<number | null>(null);
-  const [sectionRegeneration, setSectionRegeneration] = useState<SectionRegeneration | null>(null);
   const [confirmDeleteIndex, setConfirmDeleteIndex] = useState<number | null>(null);
   const [sectionTimings, setSectionTimings] = useState<{ startMs: number; endMs: number }[]>(
     () => initialState?.sectionTimings ?? []
   );
   const [deletingSection, setDeletingSection] = useState(false);
   const [autoRegenRunning, setAutoRegenRunning] = useState(false);
+  const [globalPlanOpen, setGlobalPlanOpen] = useState(false);
+  const [globalTagInput, setGlobalTagInput] = useState('');
+  const [globalNegTagInput, setGlobalNegTagInput] = useState('');
   const [lockedSections, setLockedSections] = useState<SongSection[]>(
     () => initialState?.lockedSections ?? initial.sections.map(s => ({
       ...s,
       style: s.style ?? initial.genre.toLowerCase(),
-      durationMs: s.durationMs ?? defaultDurationMs(initial.tempo),
     }))
   );
 
   const hasAudio = !!liveInstrumentalUrl;
+
+  // Global spacebar → play/pause (skip when focus is inside a text input)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code !== 'Space') return;
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
+      if (!hasAudio) return;
+      e.preventDefault();
+      if (isAudioPlaying) {
+        setPauseAudioTrigger(prev => prev + 1);
+      } else {
+        setPlayAudioTrigger(prev => prev + 1);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [hasAudio, isAudioPlaying]);
 
   // Expose project state via ref for parent-level save/load
   useImperativeHandle(ref, () => ({
@@ -499,7 +531,6 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
     setLockedSections(prev => prev.filter((_, i) => i !== index));
     setSectionTakes(prev => prev.filter((_, i) => i !== index));
     setConfirmDeleteIndex(null);
-    if (sectionRegeneration?.sectionIndex === index) setSectionRegeneration(null);
   };
 
   // ── Section drag-to-reorder ──────────────────────────────────────────────────
@@ -522,8 +553,25 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
 
   // ── Audio generation ─────────────────────────────────────────────────────────
 
+  const cancelGeneration = () => {
+    generateAbortRef.current?.abort();
+    generateAbortRef.current = null;
+    if (audioCrawlRef.current) { clearInterval(audioCrawlRef.current); audioCrawlRef.current = null; }
+    if (separationCrawlRef.current) { clearInterval(separationCrawlRef.current); separationCrawlRef.current = null; }
+    if (instSepCrawlRef.current) { clearInterval(instSepCrawlRef.current); instSepCrawlRef.current = null; }
+    setGenerating(false);
+    setSeparating(false);
+    setSeparatingInstruments(false);
+    setSeparatingOtherStem(false);
+    setAudioProgress(0);
+    setSeparationProgress(0);
+    setInstSepProgress(0);
+  };
+
   const generateAudio = async () => {
     const useInstOnly = forceInstrumental;
+    const abortController = new AbortController();
+    generateAbortRef.current = abortController;
     onGenerationStart?.();
     setGenerating(true);
     setAudioProgress(5);
@@ -538,6 +586,7 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...song, audioPrompt, forceInstrumental: useInstOnly }),
+        signal: abortController.signal,
       });
       if (!res.ok) throw new Error(await res.text());
       ({ audioUrl, wordTimestamps } = await res.json() as {
@@ -559,10 +608,12 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
         }
       } catch { /* best-effort */ }
     } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') return; // user cancelled — no error toast
       setError(err instanceof Error ? err.message : 'Audio generation failed');
       setGenerating(false);
       return;
     } finally {
+      generateAbortRef.current = null;
       setGenerating(false);
     }
 
@@ -579,6 +630,7 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
     };
     setSongTakes(prev => [...prev, newTake]);
     setActiveSongTakeId(id);
+    shouldScrollToAudioRef.current = true;
     setLiveInstrumentalUrl(audioUrl);
     setLiveVocalsUrl(undefined);
     setLiveAudioHasVocals(!useInstOnly); // if we generated with vocals, flag it so recording knows to split first
@@ -592,7 +644,7 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
       instrumentalUrl: audioUrl,
       wordTimestamps,
     }]));
-    setSectionTimings(computeSectionTimings(song.sections, song.tempo));
+    setSectionTimings(timingsFromBars(song.sections, song.tempo));
     setSeparationMethod(null);
   };
 
@@ -628,12 +680,6 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
       instrumentalUrl = aligned.urlA;
       vocalsUrl       = aligned.urlB;
       setSeparationMethod('elevenlabs');
-    } catch (err) {
-      console.warn('ElevenLabs stem separation failed, using ICA fallback:', err instanceof Error ? err.message : err);
-      const split = await splitStereoToTracks(audioUrl);
-      instrumentalUrl = split.instrumentalUrl;
-      vocalsUrl       = split.vocalsUrl;
-      setSeparationMethod('ica');
     } finally {
       clearTimeout(t1);
       if (separationCrawlRef.current) clearInterval(separationCrawlRef.current);
@@ -678,7 +724,70 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
 
   // ── Section regeneration ──────────────────────────────────────────────────────
 
-  const handleRegenerateSection = async (sectionIndex: number, regenMode: 'vocals' | 'instruments' | 'both' = 'both') => {
+  const handleSliceSection = (index: number, localRatio: number) => {
+    const timing = sectionTimings[index];
+    const original = song.sections[index];
+    const splitMs = timing
+      ? timing.startMs + localRatio * (timing.endMs - timing.startMs)
+      : undefined;
+
+    const sectionA: SongSection = {
+      ...original,
+      label: `${original.label} A`,
+      durationMs: timing ? Math.round(splitMs! - timing.startMs) : original.durationMs,
+    };
+    const sectionB: SongSection = {
+      ...original,
+      label: `${original.label} B`,
+      durationMs: timing ? Math.round(timing.endMs - splitMs!) : original.durationMs,
+    };
+
+    setSong(s => ({
+      ...s,
+      sections: [...s.sections.slice(0, index), sectionA, sectionB, ...s.sections.slice(index + 1)],
+    }));
+    setLockedSections(prev => {
+      const next = [...prev];
+      next.splice(index, 1, { ...original }, { ...original });
+      return next;
+    });
+    setSectionTakes(prev => {
+      const next = [...prev];
+      next.splice(index, 1, prev[index] ?? [], []);
+      return next;
+    });
+    if (timing && splitMs !== undefined) {
+      setSectionTimings(prev => {
+        const next = [...prev];
+        next.splice(index, 1,
+          { startMs: timing.startMs, endMs: Math.round(splitMs) },
+          { startMs: Math.round(splitMs), endMs: timing.endMs },
+        );
+        return next;
+      });
+    }
+  };
+
+  const handleFadeOutSection = async (index: number) => {
+    if (!liveInstrumentalUrl) return;
+    const timing = sectionTimings[index];
+    if (!timing) return;
+    const beatMs = 60000 / song.tempo;
+    const fadeStartMs = timing.endMs - 2 * beatMs;
+    const fadeEndMs   = timing.endMs;
+    const { applyFadeOut } = await import('@/lib/audio/splice');
+    const result = await applyFadeOut(liveInstrumentalUrl, liveWordTimestamps, fadeStartMs, fadeEndMs);
+    setLiveInstrumentalUrl(result.audioUrl);
+    setLiveWordTimestamps(result.wordTimestamps);
+    setAudioResetKey(k => k + 1);
+    setSongTakes(prev => prev.map(t =>
+      t.id === activeSongTakeId
+        ? { ...t, audioUrl: result.audioUrl, instrumentalUrl: result.audioUrl }
+        : t
+    ));
+  };
+
+  const handleRegenerateSection = async (sectionIndex: number, mode: 'both' | 'vocals' | 'instrumental' = 'both') => {
     const sectionLabel = song.sections[sectionIndex].label;
     const takeNum = (sectionTakes[sectionIndex]?.length ?? 0) + 1;
     const snap: SectionTake = {
@@ -690,181 +799,94 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
       vocalsUrl: liveVocalsUrl,
       wordTimestamps: [...liveWordTimestamps],
     };
-    setSectionTakes(prev => {
-      const next = [...prev];
-      next[sectionIndex] = [...(next[sectionIndex] ?? []), snap];
-      return next;
-    });
-
+    setSectionTakes(prev => { const next = [...prev]; next[sectionIndex] = [...(next[sectionIndex] ?? []), snap]; return next; });
     setRegeneratingSectionIndex(sectionIndex);
     setError('');
     try {
+      // Always cut at bar-exact positions, independent of any audio-position drift.
+      const barTimings = timingsFromBars(song.sections, song.tempo);
+      const timing = barTimings[sectionIndex];
+
       const res = await fetch('/api/generate/section', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ song, sectionIndex, originalSection: lockedSections[sectionIndex], regenMode }),
+        body: JSON.stringify({
+          song,
+          sectionIndex,
+          originalSection: lockedSections[sectionIndex],
+          mode,
+        }),
       });
       if (!res.ok) throw new Error(await res.text());
-      const { audioUrl, wordTimestamps, vocalsOnly, instrumentalOnly } = await res.json() as {
-        audioUrl: string; wordTimestamps: WordTimestamp[]; vocalsOnly: boolean; instrumentalOnly: boolean;
+      const { audioUrl: rawAudio, wordTimestamps: rawTs } = await res.json() as {
+        audioUrl: string; wordTimestamps: WordTimestamp[];
       };
 
-      let instUrl: string;
-      let vocUrl: string | undefined;
-      // Track effective base URLs — may update if we split the full audio during vocalsOnly handling
-      let baseInstUrl = liveInstrumentalUrl;
-      let baseVocUrl: string | undefined = liveVocalsUrl;
+      // Fit the returned audio to the section's exact bar duration so the swap
+      // lands precisely on bar boundaries.
+      const sectionDurMs = song.sections[sectionIndex].durationMs ?? Math.round(4 * 240000 / song.tempo);
+      const { fitAudioToMs } = await import('@/lib/audio/splice');
+      const fitted = await fitAudioToMs(rawAudio, rawTs, sectionDurMs);
+      const newAudio = fitted.audioUrl;
+      const newTs    = fitted.wordTimestamps;
 
-      if (vocalsOnly) {
-        if (!liveVocalsUrl) {
-          // No separated tracks yet — auto-split now so we have a clean vocal track to splice into
-          const split = await doSplit(liveInstrumentalUrl);
-          instUrl = split.instrumentalUrl;
-          vocUrl  = audioUrl; // the newly generated vocals
-          baseInstUrl = split.instrumentalUrl;
-          baseVocUrl  = split.vocalsUrl;
-          // Update live state so AudioPlayer remounts with separated tracks
-          setLiveInstrumentalUrl(split.instrumentalUrl);
-          setLiveVocalsUrl(split.vocalsUrl);
-          setAudioResetKey(k => k + 1);
-          setSongTakes(prev => prev.map(t =>
-            t.id === activeSongTakeId
-              ? { ...t, instrumentalUrl: split.instrumentalUrl, vocalsUrl: split.vocalsUrl }
-              : t
-          ));
+      // When tracks are split, route the result to the right track.
+      // vocals mode  → swap into liveVocalsUrl only (instrumental untouched)
+      // instrumental → swap into liveInstrumentalUrl only (vocals + word timestamps untouched)
+      // both / unsplit → swap into liveInstrumentalUrl (legacy mixed-track behaviour)
+      const isVocalsSwap = mode === 'vocals' && !!liveVocalsUrl;
+      const isInstSwap   = mode === 'instrumental' && !!liveVocalsUrl;
+      const swapSourceUrl = isVocalsSwap ? liveVocalsUrl! : liveInstrumentalUrl;
+      // Word timestamps belong to the vocal content; only pass them when swapping vocals.
+      const swapSourceTs  = isVocalsSwap ? liveWordTimestamps : (isInstSwap ? [] : liveWordTimestamps);
+
+      let finalInstUrl  = liveInstrumentalUrl;
+      let finalVocUrl   = liveVocalsUrl;
+      let finalTs       = liveWordTimestamps;
+
+      const startMs = timing?.startMs;
+      const endMs   = timing?.endMs;
+      if (startMs !== undefined && endMs !== undefined) {
+        const { swapSection } = await import('@/lib/audio/splice');
+        const r = await swapSection(swapSourceUrl, swapSourceTs, startMs, endMs, newAudio, newTs);
+        if (isVocalsSwap) {
+          finalVocUrl = r.audioUrl;
+          finalTs     = r.wordTimestamps;
         } else {
-          instUrl = liveInstrumentalUrl;
-          vocUrl  = audioUrl;
-        }
-      } else if (instrumentalOnly) {
-        instUrl = audioUrl;
-        vocUrl  = liveVocalsUrl;
-      } else {
-        // Full mix — split into clean stems.
-        // When vocal tracks are already separated, use ElevenLabs (neural separation) to prevent
-        // instrumental bleed into the clean vocal track. Client-side ICA only when no vocal track exists.
-        if (liveVocalsUrl) {
-          const audioDataUrl = audioUrl.startsWith('blob:') ? await blobUrlToDataUrl(audioUrl) : audioUrl;
-          const splitRes = await fetch('/api/split', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ audioUrl: audioDataUrl }),
-          });
-          if (!splitRes.ok) throw new Error(`Stem separation failed: ${await splitRes.text()}`);
-          const { vocals: vocalsDataUrl, instrumental: instDataUrl } = await splitRes.json() as { vocals: string; instrumental: string };
-          instUrl = await toBlobUrl(instDataUrl);
-          vocUrl  = await toBlobUrl(vocalsDataUrl);
-        } else {
-          const split = await splitStereoToTracks(audioUrl);
-          instUrl = split.instrumentalUrl;
-          vocUrl  = split.vocalsUrl;
+          finalInstUrl = r.audioUrl;
+          if (!isInstSwap) finalTs = r.wordTimestamps; // unsplit: timestamps travel with the mix
         }
       }
 
-      // If this is a freshly-added (zero-duration) section, insert audio rather than splice
-      const timing = sectionTimings[sectionIndex];
-      if (timing !== undefined && timing.startMs === timing.endMs) {
-        const insertAtMs = timing.startMs;
+      playAfterRegenRef.current = sectionIndex;
+      if (finalInstUrl !== liveInstrumentalUrl) setLiveInstrumentalUrl(finalInstUrl);
+      if (finalVocUrl  !== liveVocalsUrl)       setLiveVocalsUrl(finalVocUrl);
+      if (finalTs      !== liveWordTimestamps)  setLiveWordTimestamps(finalTs);
+      setAudioResetKey(k => k + 1);
 
-        // Trim inserted audio to beat 1 so subsequent sections' timestamps shift only by
-        // the rhythmically-meaningful duration (no pre-beat leading content included).
-        const { url: trimmedInstUrl, trimmedMs: instTrimMs } = await trimToDownbeat(instUrl, song.tempo);
-        const trimmedWordTimestamps = instTrimMs > 0
-          ? wordTimestamps.map(w => ({
-              ...w,
-              start_ms: Math.max(0, w.start_ms - instTrimMs),
-              end_ms:   Math.max(0, w.end_ms   - instTrimMs),
-            }))
-          : wordTimestamps;
-        const instInsert = await insertAudioAtMs(baseInstUrl, liveWordTimestamps, insertAtMs, trimmedInstUrl, trimmedWordTimestamps);
+      setSongTakes(prev => prev.map(t =>
+        t.id === activeSongTakeId
+          ? {
+              ...t,
+              audioUrl:       finalInstUrl,
+              instrumentalUrl: finalInstUrl,
+              vocalsUrl:       finalVocUrl,
+              wordTimestamps:  finalTs,
+            }
+          : t
+      ));
 
-        let finalVocUrl: string | undefined = baseVocUrl;
-        if (baseVocUrl && vocUrl) {
-          const { url: trimmedVocUrl } = await trimToDownbeat(vocUrl, song.tempo);
-          const vocInsert = await insertAudioAtMs(baseVocUrl, [], insertAtMs, trimmedVocUrl, []);
-          finalVocUrl = vocInsert.audioUrl;
-        }
+      // Section timings are always derived from bar counts — never from audio positions.
+      // If bars changed, later sections automatically shift; if bars are unchanged, they stay put.
+      setSectionTimings(timingsFromBars(song.sections, song.tempo));
 
-        // Measure actual inserted duration from the trimmed audio so sectionTimings
-        // shift exactly matches what insertAudioAtMs applied to word timestamps.
-        const measuredCtx = new AudioContext();
-        const trimmedArr  = await fetch(trimmedInstUrl).then(r => r.arrayBuffer());
-        const trimmedDecoded = await measuredCtx.decodeAudioData(trimmedArr);
-        await measuredCtx.close();
-        const actualInsertedDurationMs = trimmedDecoded.duration * 1000;
-
-        setLiveInstrumentalUrl(instInsert.audioUrl);
-        setLiveWordTimestamps(instInsert.wordTimestamps);
-        if (finalVocUrl !== baseVocUrl) setLiveVocalsUrl(finalVocUrl);
-        setAudioResetKey(k => k + 1);
-        setSongTakes(prev => prev.map(t =>
-          t.id === activeSongTakeId
-            ? { ...t, audioUrl: instInsert.audioUrl, instrumentalUrl: instInsert.audioUrl, vocalsUrl: finalVocUrl ?? t.vocalsUrl, wordTimestamps: instInsert.wordTimestamps }
-            : t
-        ));
-        setSectionTimings(prev => {
-          const next = [...prev];
-          next[sectionIndex] = { startMs: insertAtMs, endMs: insertAtMs + actualInsertedDurationMs };
-          return next.map((t, i) => i > sectionIndex
-            ? { startMs: t.startMs + actualInsertedDurationMs, endMs: t.endMs + actualInsertedDurationMs }
-            : t
-          );
-        });
-        setLockedSections(prev => prev.map((s, i) => i === sectionIndex ? { ...song.sections[sectionIndex] } : s));
-        return; // insertion applied directly — skip sectionRegeneration splice path
-      }
-
-      const sectionTiming = sectionTimings[sectionIndex];
-      setSectionRegeneration({
-        sectionIndex,
-        audioUrl: instUrl,
-        instrumentalUrl: instUrl,
-        vocalsUrl: vocUrl,
-        wordTimestamps,
-        vocalsOnly: vocalsOnly ?? false,
-        instrumentalOnly: instrumentalOnly ?? false,
-        sectionStartMs: sectionTiming?.startMs,
-        sectionEndMs:   sectionTiming?.endMs,
-      });
       setLockedSections(prev => prev.map((s, i) => i === sectionIndex ? { ...song.sections[sectionIndex] } : s));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Section regeneration failed');
-      setSectionTakes(prev => {
-        const next = [...prev];
-        next[sectionIndex] = (next[sectionIndex] ?? []).filter(t => t.id !== snap.id);
-        return next;
-      });
+      setSectionTakes(prev => { const next = [...prev]; next[sectionIndex] = (next[sectionIndex] ?? []).filter(t => t.id !== snap.id); return next; });
     } finally {
       setRegeneratingSectionIndex(null);
     }
-  };
-
-  const handleSpliceComplete = (
-    newInstUrl: string,
-    newVocUrl: string | undefined,
-    newTs: WordTimestamp[],
-    sectionIdx: number,
-    newSectionStartMs: number,
-    newSectionEndMs: number,
-  ) => {
-    setLiveInstrumentalUrl(newInstUrl);
-    if (newVocUrl !== undefined) setLiveVocalsUrl(newVocUrl);
-    setLiveWordTimestamps(newTs);
-    setSongTakes(prev => prev.map(t =>
-      t.id === activeSongTakeId
-        ? { ...t, audioUrl: newInstUrl, instrumentalUrl: newInstUrl, vocalsUrl: newVocUrl ?? t.vocalsUrl, wordTimestamps: newTs }
-        : t
-    ));
-    // Update section timings so subsequent regenerations target the correct window
-    setSectionTimings(prev => {
-      const oldEndMs = prev[sectionIdx]?.endMs ?? newSectionEndMs;
-      const drift    = newSectionEndMs - oldEndMs;
-      return prev.map((t, i) => {
-        if (i === sectionIdx) return { startMs: newSectionStartMs, endMs: newSectionEndMs };
-        if (i > sectionIdx)   return { startMs: t.startMs + drift, endMs: t.endMs + drift };
-        return t;
-      });
-    });
   };
 
   // ── Auto-regenerate dirty sections then play ─────────────────────────────────
@@ -875,17 +897,17 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
       return;
     }
 
-    const dirty: { index: number; mode: 'vocals' | 'instruments' | 'both' }[] = [];
+    const dirty: { index: number }[] = [];
     for (let i = 0; i < Math.min(song.sections.length, lockedSections.length); i++) {
       const mode = getSectionDirtyMode(song.sections[i], lockedSections[i]);
-      if (mode) dirty.push({ index: i, mode });
+      if (mode) dirty.push({ index: i });
     }
 
     if (dirty.length > 0) {
       setAutoRegenRunning(true);
       try {
-        for (const { index, mode } of dirty) {
-          await handleRegenerateSection(index, mode);
+        for (const { index } of dirty) {
+          await handleRegenerateSection(index);
         }
       } finally {
         setAutoRegenRunning(false);
@@ -1113,18 +1135,6 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
 
   // ── Timeline editor + Mix-down ───────────────────────────────────────────────
 
-  /** Builds the track list passed to TimelineEditor */
-  const buildTimelineTracks = (): TimelineTrack[] => {
-    const result: TimelineTrack[] = [];
-    if (liveInstrumentalUrl) result.push({
-      id: 'instrumental', label: 'Instrumental', url: liveInstrumentalUrl, color: '#f37321',
-      wordTimestamps: liveWordTimestamps.length > 0 ? liveWordTimestamps : undefined,
-    });
-    if (liveVocalsUrl)       result.push({ id: 'vocals-primary', label: 'Vocals 1',    url: liveVocalsUrl,       color: '#60a5fa' });
-    extraVocalTracks.forEach(t => result.push({ id: t.id, label: t.label, url: t.url, color: '#34d399' }));
-    return result;
-  };
-
   /** Applies changes from the timeline editor back to the track state */
   const handleTimelineApply = (updated: { id: string; url: string; timestamps?: WordTimestamp[] }[]) => {
     for (const { id, url, timestamps } of updated) {
@@ -1138,7 +1148,6 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
         setExtraVocalTracks(prev => prev.map(t => t.id === id ? { ...t, url } : t));
       }
     }
-    setAudioResetKey(k => k + 1);
   };
 
   /** Mixes all tracks down to a single WAV and triggers a browser download */
@@ -1291,8 +1300,15 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
           type="text"
           value={song.title}
           onChange={e => setSong(s => ({ ...s, title: e.target.value }))}
-          className="block w-full text-xl font-bold text-[#3b3b3b] bg-transparent border-none outline-none mb-4 hover:underline hover:decoration-[#bdbdbd] focus:underline focus:decoration-[#f37321] underline-offset-2 placeholder-[#bdbdbd]"
+          className="block w-full text-xl font-bold text-[#3b3b3b] bg-transparent border-none outline-none mb-2 hover:underline hover:decoration-[#bdbdbd] focus:underline focus:decoration-[#f37321] underline-offset-2 placeholder-[#bdbdbd]"
           placeholder="Song title"
+        />
+        <textarea
+          value={audioPrompt}
+          onChange={e => onAudioPromptChange(e.target.value)}
+          rows={2}
+          className="block w-full text-xs text-[#676767] bg-transparent border-none outline-none resize-none mb-4 placeholder-[#bdbdbd] leading-relaxed"
+          placeholder="Audio generation prompt…"
         />
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           {([
@@ -1328,6 +1344,138 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
             </div>
           </div>
         </div>
+        {/* ── Global composition plan ── */}
+        {(() => {
+          const globalPlan = computeGlobalCompositionPlan(song);
+
+          const posRemovedSet  = new Set(song.positiveGlobalRemove ?? []);
+          const posAddedTags   = song.positiveGlobalAdd ?? [];
+          const displayedPositive = [
+            ...globalPlan.positiveGlobal.filter(t => !posRemovedSet.has(t)),
+            ...posAddedTags,
+          ];
+
+          const negRemovedSet  = new Set(song.negativeGlobalRemove ?? []);
+          const negAddedTags   = song.negativeGlobalAdd ?? [];
+          const displayedNegative = [
+            ...globalPlan.negativeGlobal.filter(t => !negRemovedSet.has(t)),
+            ...negAddedTags,
+          ];
+
+          const hasOverrides =
+            posRemovedSet.size > 0 || posAddedTags.length > 0 ||
+            negRemovedSet.size > 0 || negAddedTags.length > 0;
+
+          const removePosTag = (tag: string) => {
+            if (posAddedTags.includes(tag)) {
+              setSong(s => ({ ...s, positiveGlobalAdd: posAddedTags.filter(t => t !== tag) }));
+            } else {
+              setSong(s => ({ ...s, positiveGlobalRemove: [...(s.positiveGlobalRemove ?? []), tag] }));
+            }
+          };
+          const addPosTag = (tag: string) => {
+            const trimmed = tag.trim();
+            if (!trimmed || displayedPositive.includes(trimmed)) return;
+            setSong(s => ({ ...s, positiveGlobalAdd: [...(s.positiveGlobalAdd ?? []), trimmed] }));
+          };
+
+          const removeNegTag = (tag: string) => {
+            if (negAddedTags.includes(tag)) {
+              setSong(s => ({ ...s, negativeGlobalAdd: negAddedTags.filter(t => t !== tag) }));
+            } else {
+              setSong(s => ({ ...s, negativeGlobalRemove: [...(s.negativeGlobalRemove ?? []), tag] }));
+            }
+          };
+          const addNegTag = (tag: string) => {
+            const trimmed = tag.trim();
+            if (!trimmed || displayedNegative.includes(trimmed)) return;
+            setSong(s => ({ ...s, negativeGlobalAdd: [...(s.negativeGlobalAdd ?? []), trimmed] }));
+          };
+
+          return (
+            <div className="mt-4 pt-4 border-t border-[#e9e9e9]">
+              <button
+                type="button"
+                onClick={() => setGlobalPlanOpen(o => !o)}
+                className="flex items-center gap-1.5 text-xs text-[#676767] hover:text-[#3b3b3b] transition-colors"
+              >
+                <span className={`inline-flex items-center justify-center w-4 h-4 rounded border border-[#bdbdbd] text-[#676767] transition-transform ${globalPlanOpen ? 'rotate-45' : ''}`}>+</span>
+                Global Styles
+                {!globalPlanOpen && hasOverrides && (
+                  <span className="text-[9px] text-[#f37321] font-semibold ml-0.5">edited</span>
+                )}
+              </button>
+              {globalPlanOpen && (
+                <div className="mt-2 flex flex-col gap-2">
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <p className="text-[10px] font-semibold text-[#929292] uppercase tracking-wider">Positive</p>
+                      {hasOverrides && (
+                        <button
+                          type="button"
+                          onClick={() => setSong(s => ({ ...s, positiveGlobalAdd: [], positiveGlobalRemove: [], negativeGlobalAdd: [], negativeGlobalRemove: [] }))}
+                          className="text-[9px] text-[#929292] hover:text-[#464646] transition-colors"
+                        >
+                          Reset all
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-1 items-center">
+                      {displayedPositive.map((tag, i) => (
+                        <span
+                          key={i}
+                          className={`group flex items-center gap-0.5 px-1.5 py-0.5 rounded border text-[10px] font-mono ${
+                            posAddedTags.includes(tag)
+                              ? 'bg-[#fff3eb] border-[#f37321] text-[#c45a10]'
+                              : 'bg-[#fff3eb] border-[#f37321]/30 text-[#c45a10]'
+                          }`}
+                        >
+                          {tag}
+                          <button type="button" onClick={() => removePosTag(tag)}
+                            className="opacity-0 group-hover:opacity-60 hover:!opacity-100 transition-opacity leading-none text-[10px] ml-0.5"
+                            aria-label={`Remove ${tag}`}>×</button>
+                        </span>
+                      ))}
+                      <form onSubmit={e => { e.preventDefault(); addPosTag(globalTagInput); setGlobalTagInput(''); }} className="flex items-center">
+                        <input type="text" value={globalTagInput} onChange={e => setGlobalTagInput(e.target.value)}
+                          placeholder="+ add"
+                          className="w-14 rounded bg-[#f6f6f6] border border-[#e9e9e9] text-[#3b3b3b] placeholder-[#bdbdbd] px-2 py-0.5 text-[10px] font-mono focus:outline-none focus:ring-1 focus:ring-[#f37321] focus:border-[#f37321]"
+                          onBlur={() => { if (globalTagInput.trim()) { addPosTag(globalTagInput); setGlobalTagInput(''); } }} />
+                      </form>
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-semibold text-[#929292] uppercase tracking-wider mb-1">Negative</p>
+                    <div className="flex flex-wrap gap-1 items-center">
+                      {displayedNegative.map((tag, i) => (
+                        <span
+                          key={i}
+                          className={`group flex items-center gap-0.5 px-1.5 py-0.5 rounded border text-[10px] font-mono ${
+                            negAddedTags.includes(tag)
+                              ? 'bg-[#f6f6f6] border-[#929292] text-[#676767]'
+                              : 'bg-[#f6f6f6] border-[#e9e9e9] text-[#929292]'
+                          }`}
+                        >
+                          {tag}
+                          <button type="button" onClick={() => removeNegTag(tag)}
+                            className="opacity-0 group-hover:opacity-60 hover:!opacity-100 transition-opacity leading-none text-[10px] ml-0.5"
+                            aria-label={`Remove ${tag}`}>×</button>
+                        </span>
+                      ))}
+                      <form onSubmit={e => { e.preventDefault(); addNegTag(globalNegTagInput); setGlobalNegTagInput(''); }} className="flex items-center">
+                        <input type="text" value={globalNegTagInput} onChange={e => setGlobalNegTagInput(e.target.value)}
+                          placeholder="+ add"
+                          className="w-14 rounded bg-[#f6f6f6] border border-[#e9e9e9] text-[#3b3b3b] placeholder-[#bdbdbd] px-2 py-0.5 text-[10px] font-mono focus:outline-none focus:ring-1 focus:ring-[#929292] focus:border-[#929292]"
+                          onBlur={() => { if (globalNegTagInput.trim()) { addNegTag(globalNegTagInput); setGlobalNegTagInput(''); } }} />
+                      </form>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
         <div className="mt-4 pt-4 border-t border-[#e9e9e9]">
           <div className="flex items-center justify-between gap-4">
             {/* Left: Edit Sections (when collapsed) + Regenerate Plan */}
@@ -1343,20 +1491,15 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
                   Edit Sections
                 </button>
               )}
-              {/* Regenerate Plan — left side so Generate Audio stays uncluttered */}
+              {/* Edit Song Plan — reopens the AI/prompt input panel */}
               <button
-                onClick={() => void generateAudio()}
-                disabled={generating || autoRegenRunning}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#bdbdbd] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold transition-colors flex-shrink-0"
+                onClick={onEditSongPlan}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#bdbdbd] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] text-xs font-semibold transition-colors flex-shrink-0"
               >
-                {generating ? 'Generating…' : (
-                  <>
-                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                    </svg>
-                    Regenerate Plan
-                  </>
-                )}
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                </svg>
+                Edit Song Plan
               </button>
             </div>
 
@@ -1495,7 +1638,7 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
                     index={i}
                     tempo={song.tempo}
                     onChange={updateSection}
-                    onRegenerate={hasAudio ? (mode) => handleRegenerateSection(i, mode) : undefined}
+                    onRegenerate={hasAudio ? () => handleRegenerateSection(i) : undefined}
                     regenerating={regeneratingSectionIndex === i}
                     isNewSection={hasAudio && sectionTimings[i] !== undefined && sectionTimings[i].startMs === sectionTimings[i].endMs}
                     onInsertAfter={() => insertSection(i)}
@@ -1510,6 +1653,19 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
                         setPlaySectionRequest(prev => ({ index: i, seq: (prev?.seq ?? 0) + 1 }));
                       }
                     } : undefined}
+                    compositionPlan={computeCompositionPlan(song, i)}
+                    onGenerateChords={async (directive) => {
+                      try {
+                        const res = await fetch('/api/generate/chords', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ song, sectionIndex: i, directive }),
+                        });
+                        if (!res.ok) return;
+                        const { chords } = await res.json() as { chords: string[] };
+                        updateSection(i, { ...song.sections[i], chords });
+                      } catch { /* ignore */ }
+                    }}
                   />
 
                 </div>
@@ -1529,7 +1685,7 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
 
       {/* Song takes selector + AudioPlayer */}
       {hasAudio && (
-        <div id="song-audio-player" className="flex flex-col gap-3">
+        <div ref={audioPlayerRef} id="song-audio-player" className="flex flex-col gap-3">
           {error && <p className="text-sm text-red-600">{error}</p>}
           {/* Takes bar */}
           <div className="flex items-center gap-2 flex-wrap">
@@ -1566,41 +1722,25 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
                 )}
               </div>
             ))}
-            {/* Spacer + Edit Tracks + Mix Down — far right */}
+            {/* Spacer + Mix Down — far right */}
             <div className="flex-1" />
             {separationMethod && (
-              <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
-                separationMethod === 'elevenlabs'
-                  ? 'bg-[#e8f5e9] text-[#2e7d32]'
-                  : 'bg-[#fff3e0] text-[#e65100]'
-              }`}>
-                {separationMethod === 'elevenlabs' ? 'ElevenLabs stems' : 'ICA fallback'}
+              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-[#e8f5e9] text-[#2e7d32]">
+                ElevenLabs stems
               </span>
             )}
             {liveInstrumentalUrl && (
-              <>
-                <button
-                  onClick={() => setShowTimeline(true)}
-                  className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium border border-[#e0e0e0] text-[#929292] hover:text-[#f37321] hover:border-[#f37321] transition-colors"
-                  title="Open track editor"
-                >
-                  <svg className="w-3 h-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                    <rect x="1" y="4" width="6" height="3" rx="0.5"/><rect x="9" y="4" width="6" height="3" rx="0.5"/><rect x="3" y="9" width="7" height="3" rx="0.5"/>
-                  </svg>
-                  Edit Tracks
-                </button>
-                <button
-                  onClick={handleMixDown}
-                  disabled={mixingDown}
-                  className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium border border-[#e0e0e0] text-[#929292] hover:text-[#f37321] hover:border-[#f37321] transition-colors disabled:opacity-40"
-                  title="Mix all tracks down to a WAV file"
-                >
-                  <svg className="w-3 h-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                    <path d="M8 2v8M5 7l3 3 3-3M2 13h12"/>
-                  </svg>
-                  {mixingDown ? 'Mixing…' : 'Mix Down'}
-                </button>
-              </>
+              <button
+                onClick={handleMixDown}
+                disabled={mixingDown}
+                className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium border border-[#e0e0e0] text-[#929292] hover:text-[#f37321] hover:border-[#f37321] transition-colors disabled:opacity-40"
+                title="Mix all tracks down to a WAV file"
+              >
+                <svg className="w-3 h-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path d="M8 2v8M5 7l3 3 3-3M2 13h12"/>
+                </svg>
+                {mixingDown ? 'Mixing…' : 'Mix Down'}
+              </button>
             )}
           </div>
 
@@ -1614,9 +1754,6 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
               sections={song.sections}
               wordTimestamps={liveWordTimestamps}
               tempo={song.tempo}
-              pendingRegeneration={sectionRegeneration}
-              onRegenerationComplete={() => setSectionRegeneration(null)}
-              onSpliceComplete={handleSpliceComplete}
               onActiveSectionChange={setPlayingSection}
               onRegenerateVocals={liveVocalsUrl ? regenerateVocals : undefined}
               onRegenerateInstrumental={regenerateInstrumental}
@@ -1632,6 +1769,7 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
               onSplitTracks={liveInstrumentalUrl && !forceInstrumental ? splitTracks : undefined}
               onRejoinTracks={liveVocalsUrl && preSplitUrlRef.current ? rejoinTracks : undefined}
               splitting={separating}
+              onPlayStateChange={setIsAudioPlaying}
               playTrigger={playAudioTrigger}
               pauseTrigger={pauseAudioTrigger}
               playSectionRequest={playSectionRequest ?? undefined}
@@ -1650,20 +1788,18 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
                 setLiveVocalsUrl(undefined);
                 setAudioResetKey(k => k + 1);
               }}
+              onReorderSections={handleDrop}
+              onTimelineApply={handleTimelineApply}
+              onRegenerateSection={(index, mode) => void handleRegenerateSection(index, mode)}
+              regeneratingSectionIndex={regeneratingSectionIndex}
+              onSliceSection={handleSliceSection}
+              onFadeOutSection={index => void handleFadeOutSection(index)}
+              sectionTimings={sectionTimings}
             />
           )}
 
 
         </div>
-      )}
-
-      {/* Timeline Editor modal */}
-      {showTimeline && (
-        <TimelineEditor
-          tracks={buildTimelineTracks()}
-          onApply={handleTimelineApply}
-          onClose={() => setShowTimeline(false)}
-        />
       )}
 
       {/* 3-2-1 Countdown modal */}
@@ -1746,6 +1882,22 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
                 </div>
                 <p className="text-xs text-[#929292]">{instSepStep}</p>
               </>
+            )}
+            {/* Cancel button — only shown during initial generation (separation is fast and hard to interrupt) */}
+            {generating && (
+              <div className="mt-4 flex justify-end">
+                <button
+                  type="button"
+                  onClick={cancelGeneration}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#e9e9e9] bg-[#f6f6f6] hover:bg-[#e9e9e9] text-[#464646] text-xs font-medium transition-colors"
+                >
+                  <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                    <line x1="2" y1="2" x2="10" y2="10"/>
+                    <line x1="10" y1="2" x2="2" y2="10"/>
+                  </svg>
+                  Cancel
+                </button>
+              </div>
             )}
           </div>
         </div>

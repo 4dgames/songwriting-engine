@@ -17,47 +17,35 @@ function diffSections(original: SongSection, current: SongSection): ChangedField
 }
 
 export async function POST(req: NextRequest) {
-  const { song, sectionIndex, originalSection, regenMode } = await req.json() as {
+  const { song, sectionIndex, originalSection, mode } = await req.json() as {
     song: Song;
     sectionIndex: number;
     originalSection?: SongSection;
-    regenMode?: 'vocals' | 'instruments' | 'both';
+    mode?: 'both' | 'vocals' | 'instrumental';
   };
-
-  const prevSection = song.sections[sectionIndex - 1] as SongSection | undefined;
-  const nextSection = song.sections[sectionIndex + 1] as SongSection | undefined;
 
   const section = song.sections[sectionIndex];
   if (!section) return NextResponse.json({ error: 'Invalid section index' }, { status: 400 });
 
+  const prevSection = song.sections[sectionIndex - 1] as SongSection | undefined;
+  const nextSection = song.sections[sectionIndex + 1] as SongSection | undefined;
   const changedFields = originalSection ? diffSections(originalSection, section) : [];
 
-  // Explicit mode takes priority; fall back to auto-detection from changed fields
-  let vocalsOnly: boolean;
-  let instrumentalOnly: boolean;
-  if (regenMode === 'vocals') {
-    vocalsOnly = true;
-    instrumentalOnly = false;
-  } else if (regenMode === 'instruments') {
-    vocalsOnly = false;
-    instrumentalOnly = true;
-  } else {
-    // 'both' or no explicit mode — auto-detect from changed fields
-    vocalsOnly = changedFields.length > 0 &&
-      changedFields.every(f => f === 'lyrics' || f === 'vocalists');
-    instrumentalOnly = false;
-  }
+  const sectionContext: SectionRegenerationContext = {
+    originalSection: originalSection ?? section,
+    changedFields,
+    vocalsOnly: mode === 'vocals',
+    prevSection,
+    nextSection,
+  };
 
-  const sectionContext: SectionRegenerationContext | undefined = originalSection
-    ? { originalSection, changedFields, vocalsOnly, prevSection, nextSection }
-    : undefined;
+  const singleSection: Song = { ...song, sections: [section] };
 
-  const singleSectionSong: Song = { ...song, sections: [section] };
   const provider = getAudioProvider();
-  const { audioUrl, wordTimestamps } = await provider.generate(
-    singleSectionSong,
-    sectionContext,
-    instrumentalOnly,
-  );
-  return NextResponse.json({ audioUrl, wordTimestamps: wordTimestamps ?? [], vocalsOnly, instrumentalOnly });
+  const result = await provider.generate(singleSection, sectionContext, mode === 'instrumental');
+
+  return NextResponse.json({
+    audioUrl:       result.audioUrl,
+    wordTimestamps: result.wordTimestamps ?? [],
+  });
 }
