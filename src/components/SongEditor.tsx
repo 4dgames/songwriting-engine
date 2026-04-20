@@ -1770,6 +1770,7 @@ const SongEditor = forwardRef<SongEditorHandle, Props>(function SongEditor({ son
               regeneratingTrackId={regeneratingTrackId}
               onFadeOutSection={index => void handleFadeOutSection(index)}
               onSliceSection={handleSliceSection}
+              onDeleteSection={index => void deleteSection(index)}
               sectionTimings={sectionTimings}
             />
           )}

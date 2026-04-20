@@ -52,6 +52,7 @@ interface Props {
   regeneratingTrackId?: string | null;
   onFadeOutSection?: (index: number) => void;
   onSliceSection?: (index: number, sliceAtMs: number) => void;
+  onDeleteSection?: (index: number) => void;
   sectionTimings?: { startMs: number; endMs: number }[];
 }
 
@@ -79,6 +80,7 @@ export default function AudioPlayer({
   regeneratingTrackId,
   onFadeOutSection,
   onSliceSection,
+  onDeleteSection,
   sectionTimings,
 }: Props) {
   const audioRef  = useRef<HTMLAudioElement>(null);
@@ -110,8 +112,9 @@ export default function AudioPlayer({
   const [otherVolume,   setOtherVolume]   = useState(0.8);
   const [other2VocalsVol, setOther2VocalsVol] = useState(0.8);
   const [other2InstVol,   setOther2InstVol]   = useState(0.8);
-  const [mixing,         setMixing]         = useState(false);
-  const [mixUrl,         setMixUrl]         = useState<string | null>(null);
+  const [mixing,           setMixing]           = useState(false);
+  const [mixUrl,           setMixUrl]           = useState<string | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [regionSel,      setRegionSel]      = useState<{ trackId: string; startRatio: number; endRatio: number } | null>(null);
   const [applyingRegion, setApplyingRegion] = useState(false);
   const [mutedRegions,   setMutedRegions]   = useState<{ id: string; trackId: string; startRatio: number; endRatio: number }[]>([]);
@@ -391,6 +394,7 @@ export default function AudioPlayer({
   const handleSectionClick = useCallback((index: number, trackId?: string) => {
     setActiveSectionIndex(prev => prev === index && activeTrackId === (trackId ?? null) ? null : index);
     setActiveTrackId(trackId ?? null);
+    setConfirmingDelete(false);
     const marker = sectionMarkersRef.current[index];
     if (marker) seek(marker.ratio);
   }, [seek, activeTrackId]);
@@ -843,16 +847,6 @@ export default function AudioPlayer({
           {/* Center: edit action buttons */}
           <div className="flex-1 flex justify-center">
             <div className="flex items-center gap-1.5 flex-wrap justify-center">
-              {/* Clip at Playhead */}
-              {onSliceSection && sectionMarkers.length > 1 && (
-                <button
-                  onClick={handleClipAtPlayhead}
-                  className="px-2.5 py-1 text-xs border border-[#e9e9e9] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] rounded font-medium transition-colors"
-                >✂ Clip at Playhead</button>
-              )}
-              {onSliceSection && sectionMarkers.length > 1 && (editHistory.length > 0 || editFuture.length > 0 || clipboard || regionSel) && (
-                <div className="w-px h-4 bg-[#e9e9e9] mx-0.5" />
-              )}
               {/* Undo / Redo */}
               {(editHistory.length > 0 || editFuture.length > 0) && (<>
                 <button
@@ -923,8 +917,58 @@ export default function AudioPlayer({
             </div>
           </div>
 
-          {/* Right: zoom controls */}
-          <div className="flex items-center gap-1 flex-shrink-0">
+          {/* Right: clip/delete + zoom controls */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            {/* Clip at playhead */}
+            {onSliceSection && sectionMarkers.length > 1 && (
+              <button
+                onClick={handleClipAtPlayhead}
+                title="Clip at nearest beat"
+                className="w-7 h-7 flex items-center justify-center rounded border border-[#e9e9e9] bg-[#f6f6f6] text-[#676767] hover:border-[#f37321] hover:text-[#f37321] transition-colors"
+              >
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="4" cy="4.5" r="2"/>
+                  <circle cx="4" cy="11.5" r="2"/>
+                  <line x1="5.8" y1="5.6" x2="14" y2="10"/>
+                  <line x1="5.8" y1="10.4" x2="14" y2="6"/>
+                </svg>
+              </button>
+            )}
+            {/* Delete active section — first click asks to confirm */}
+            {onDeleteSection && activeSectionIndex !== null && activeSectionIndex !== undefined && sectionMarkers.length > 1 && (
+              confirmingDelete ? (
+                <div className="flex items-center gap-1 bg-white border border-red-300 rounded px-2 py-1">
+                  <span className="text-[11px] text-red-600 font-medium whitespace-nowrap">Delete section?</span>
+                  <button
+                    onClick={() => { onDeleteSection(activeSectionIndex); setConfirmingDelete(false); }}
+                    className="px-1.5 py-0.5 text-[11px] bg-red-500 hover:bg-red-600 text-white rounded font-medium transition-colors"
+                  >Yes</button>
+                  <button
+                    onClick={() => setConfirmingDelete(false)}
+                    className="px-1.5 py-0.5 text-[11px] bg-[#e9e9e9] hover:bg-[#d4d4d4] text-[#3b3b3b] rounded font-medium transition-colors"
+                  >No</button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setConfirmingDelete(true)}
+                  title="Delete active section"
+                  className="w-7 h-7 flex items-center justify-center rounded border border-[#e9e9e9] bg-[#f6f6f6] text-[#676767] hover:border-red-400 hover:text-red-500 transition-colors"
+                >
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="2 4 14 4"/>
+                    <path d="M5 4V2h6v2"/>
+                    <path d="M3 4l1 10h8l1-10"/>
+                    <line x1="6" y1="7" x2="6" y2="11"/>
+                    <line x1="10" y1="7" x2="10" y2="11"/>
+                  </svg>
+                </button>
+              )
+            )}
+            {/* Divider */}
+            {(onSliceSection || onDeleteSection) && sectionMarkers.length > 1 && (
+              <div className="w-px h-4 bg-[#e9e9e9]" />
+            )}
+            {/* Zoom */}
             <button
               onClick={() => setWaveformZoom(z => Math.max(0.5, parseFloat((z - 0.5).toFixed(1))))}
               disabled={waveformZoom <= 0.5}
@@ -1016,6 +1060,7 @@ export default function AudioPlayer({
                               activeTrackId={activeTrackId}
                               onSectionClick={i => handleSectionClick(i, 'vocals-primary')}
                               onRegionSelect={(s, e) => setRegionSel({ trackId: 'vocals-primary', startRatio: s, endRatio: e })}
+                              onClearSelection={() => setRegionSel(null)}
                               selectionRegion={regionSel?.trackId === 'vocals-primary' ? regionSel : null}
                               mutedRegions={mutedRegions.filter(m => m.trackId === 'vocals-primary')}
                               onRegenerateSection={onRegenerateSection}
@@ -1052,6 +1097,7 @@ export default function AudioPlayer({
                             onBeatPhaseReady={handleBeatPhaseReady}
                             tempo={tempo}
                             onRegionSelect={(s, e) => setRegionSel({ trackId: 'instrumental', startRatio: s, endRatio: e })}
+                            onClearSelection={() => setRegionSel(null)}
                             selectionRegion={regionSel?.trackId === 'instrumental' ? regionSel : null}
                             mutedRegions={mutedRegions.filter(m => m.trackId === 'instrumental')}
                             onRegenerateSection={onRegenerateSection}
@@ -1106,6 +1152,7 @@ export default function AudioPlayer({
                           onBeatPhaseReady={handleBeatPhaseReady}
                           tempo={tempo}
                           onRegionSelect={(s, e) => setRegionSel({ trackId: 'instrumental', startRatio: s, endRatio: e })}
+                          onClearSelection={() => setRegionSel(null)}
                           selectionRegion={regionSel?.trackId === 'instrumental' ? regionSel : null}
                           mutedRegions={mutedRegions.filter(m => m.trackId === 'instrumental')}
                           onRegenerateSection={onRegenerateSection}
@@ -1207,7 +1254,7 @@ function SectionedWaveform({
   onSectionClick, onDurationReady, onBeatPhaseReady, tempo,
   onRegionSelect, selectionRegion, mutedRegions,
   onRegenerateSection, regenMode, regeneratingSectionIndex, regeneratingTrackId,
-  onFadeOutSection, trackId, activeTrackId,
+  onFadeOutSection, onClearSelection, trackId, activeTrackId,
 }: {
   audioUrl: string;
   sectionMarkers: { ratio: number; label: string }[];
@@ -1230,6 +1277,7 @@ function SectionedWaveform({
   regeneratingSectionIndex?: number | null;
   regeneratingTrackId?: string | null;
   onFadeOutSection?: (index: number) => void;
+  onClearSelection?: () => void;
   trackId?: string;
   activeTrackId?: string | null;
 }) {
@@ -1384,6 +1432,8 @@ function SectionedWaveform({
         setLiveSel(null);
         if (dx >= 8 && Math.abs(endRatio - startRatio) >= 0.005) {
           onRegionSelect(Math.min(startRatio, endRatio), Math.max(startRatio, endRatio));
+        } else if (dx < 8) {
+          onClearSelection?.();
         }
       } : undefined}
       onMouseLeave={() => {
